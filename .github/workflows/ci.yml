@@ -33,8 +33,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install pytest z3-solver
-          pip install -e .
+          pip install -e ".[test,smt]"
       - name: Test
         shell: bash
         run: pytest -q
