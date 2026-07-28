@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minicheck"
-version = "0.3.0"
+version = "0.4.0"
 description = "An explicit-state model checker in ~560 lines. Shortest counterexamples, no required dependencies."
 readme = "README.md"
 requires-python = ">=3.9"

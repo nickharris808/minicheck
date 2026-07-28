@@ -45,6 +45,8 @@ from ._core import (
     prove_latency_bound,
     z3_available,
 )
+from .export import ExportError, to_promela, to_tla
+from .model import Model, ModelError, goal, invariant, transition
 from .render import RenderTooLarge, to_dot, to_mermaid, to_svg
 from .report import to_junit, to_sarif
 from .spec import (
@@ -93,6 +95,16 @@ __all__ = [
     "to_sarif",
     "to_junit",
     "RenderTooLarge",
+    # export bridges
+    "to_promela",
+    "to_tla",
+    "ExportError",
+    # the Python-native modelling API
+    "Model",
+    "transition",
+    "invariant",
+    "goal",
+    "ModelError",
     "__version__",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"

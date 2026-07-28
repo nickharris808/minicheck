@@ -2,12 +2,12 @@
 
 [![install](https://img.shields.io/badge/install-from%20GitHub-blue)](https://github.com/nickharris808/minicheck#install)
 [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-195%20passing-brightgreen)](tests/)
+[![tests](https://img.shields.io/badge/tests-229%20passing-brightgreen)](tests/)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![deps](https://img.shields.io/badge/required%20deps-none-brightgreen)
 
-**An explicit-state model checker in ~2285 lines. Shortest counterexamples. No required dependencies.**
+**An explicit-state model checker in ~2826 lines. Shortest counterexamples. No required dependencies.**
 
 ## Why this exists
 
@@ -168,7 +168,7 @@ that flag widens only the undetermined case and never masks a real counterexampl
 | `minicheck check SPEC` | check invariants, and liveness if the spec has a `goal` |
 | `minicheck validate SPEC` | schema-check only. Does not run the search, so it terminates on any spec |
 | `minicheck example` | print a worked spec to stdout |
-| `--format F` | `text`, `json`, `sarif`, `junit`, `mermaid`, `dot`, `svg` (see above) |
+| `--format F` | `text`, `json`, `sarif`, `junit`, `mermaid`, `dot`, `svg`, `promela`, `tla` |
 | `--json` | shorthand for `--format json` |
 | `--max-nodes N` | refuse to draw a graph larger than this (default 60) |
 | `--int-bound N` | largest magnitude an integer field may take (default 64) |
@@ -337,6 +337,75 @@ good["holds"]                                  # True
 
 Two states, two labels, and the exact interleaving that breaks it.
 
+## Describe the model as a Python class
+
+The `Protocol` constructor above is honest and hostile — positional tuples, index arithmetic. The
+same machine, written as a class:
+
+```python
+from minicheck import Model, check_safety, invariant, transition
+
+class Mutex(Model):
+    a: int = 0
+    b: int = 0
+    lock: int = 0
+
+    @transition(when=lambda s: s.a == 0 and s.lock == 0)
+    def a_enter(s):
+        s.a = 1
+        s.lock = 1
+
+    @transition(when=lambda s: s.b == 0 and s.lock == 0)
+    def b_enter(s):
+        s.b = 1
+        s.lock = 1
+
+    @transition(when=lambda s: s.a == 1)
+    def a_exit(s):
+        s.a = 0
+        s.lock = 0
+
+    @invariant
+    def not_both(s):
+        return not (s.a and s.b)
+
+check_safety(Mutex.protocol())["properties"]["not_both"]["holds"]   # True
+```
+
+Fields come from annotations, so the state tuple is in the order you wrote them. This compiles to
+exactly the same `Protocol`, and a test asserts the two forms produce identical reachable sets.
+
+**The guard is separate from the body deliberately.** Inferring "enabled" from "the body changed
+something" would make a legitimate self-loop indistinguishable from a disabled transition. A bare
+`@transition` is always enabled; `when=` narrows it.
+
+Assigning a field you did not declare raises rather than inventing state the search never explores.
+
+## Export to SPIN and TLA+
+
+`minicheck` is small on purpose, and explicit-state search in CPython runs out of room somewhere
+around 10⁵–10⁶ states. When your model outgrows that, the honest answer is to use a real one — so it
+exports rather than stranding you:
+
+```console
+$ minicheck check spec.json --format promela > model.pml
+$ spin -a model.pml && gcc -o pan pan.c && ./pan -a
+pan:1: assertion violated  !(((a==1)&&(b==1))) (at depth 3)
+State-vector 20 byte, depth reached 3, errors: 1
+```
+
+`--format tla` emits a TLA+ module for TLC, with `Init`, one action per transition, `Next`, and each
+invariant as a named state predicate.
+
+**These are cross-checked, not just generated.** The test suite runs SPIN on the exported model and
+requires its verdict to match `minicheck`'s, on models where the answer is known both ways. CI
+installs SPIN so that differential actually runs rather than skipping. An export that encodes a
+subtly different machine would give you two green results where one is about the wrong system — that
+is the failure this guards against.
+
+Non-integer fields are **refused**, not mapped onto integers: a silent encoding would produce
+counterexamples that do not correspond to yours.
+
 ## Liveness is AG-EF, not plain reachability
 
 `check_liveness` asks whether **every reachable state can still reach a goal state** — not merely
@@ -488,7 +557,7 @@ probably permits a transition you did not intend.
 pip install -e ".[test,smt]" && pytest
 ```
 
-195 tests, including a check that the core module acquires no third-party import at module level, and
+229 tests, including a check that the core module acquires no third-party import at module level, and
 one test per documented function using the exact calling convention shown above.
 
 ## Where this came from, and what is not here
@@ -508,7 +577,7 @@ Five small, independently useful tools built around one idea: **a verdict you ca
 
 | | |
 |---|---|
-| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~2285 lines, with a CLI. Shortest counterexamples, no required dependencies. |
+| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~2826 lines, with a CLI. Shortest counterexamples, no required dependencies. |
 | [`protocol-bench`](https://github.com/nickharris808/protocol-bench) | 15 published IEEE 802.11 / 3GPP procedures with ground truth. A claimed detection must **replay**. |
 | [`minicheck-mcp`](https://github.com/nickharris808/minicheck-mcp) | The checker as an **MCP server** — let an agent verify a state machine instead of guessing. |
 | [`polyfrac`](https://github.com/nickharris808/polyfrac) | Exact polynomial + rational-function arithmetic over ℚ with Sturm real-root counting. Zero deps. |

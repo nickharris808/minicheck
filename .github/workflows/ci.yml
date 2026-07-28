@@ -29,6 +29,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "${{ matrix.python-version }}"}
+      - name: Install SPIN (so the export differential actually runs, not skips)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq spin
       - name: Install
         shell: bash
         run: |

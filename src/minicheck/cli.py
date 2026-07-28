@@ -29,6 +29,7 @@ import sys
 from typing import Any
 
 from ._core import check_liveness, check_safety
+from .export import ExportError, to_promela, to_tla
 from .render import RenderTooLarge, to_dot, to_mermaid, to_svg
 from .report import to_junit, to_sarif
 from .spec import DEFAULT_INT_BOUND, SpecError, protocol_from_spec, spec_warnings
@@ -46,7 +47,7 @@ __all__ = [
     "EXIT_BAD_SPEC",
 ]
 
-FORMATS = ("text", "json", "sarif", "junit", "mermaid", "dot", "svg")
+FORMATS = ("text", "json", "sarif", "junit", "mermaid", "dot", "svg", "promela", "tla")
 
 EXAMPLE_SPEC = {
     "name": "mutex",
@@ -196,6 +197,21 @@ def cmd_check(args) -> int:
             print(f"BAD SPEC\n\n  {e}", file=sys.stderr)
             return EXIT_BAD_SPEC
         return code
+
+    if fmt in ("promela", "tla"):
+        # An export is a translation, not a verdict: emit it and exit 0 unless the spec itself is
+        # unexportable. Reporting the check's verdict here would conflate "your model is broken"
+        # with "the translation failed".
+        try:
+            print(
+                to_promela(spec, int_bound=args.int_bound)
+                if fmt == "promela"
+                else to_tla(spec, int_bound=args.int_bound)
+            )
+        except ExportError as e:
+            print(f"BAD SPEC\n\n  {e}", file=sys.stderr)
+            return EXIT_BAD_SPEC
+        return EXIT_PROVED
 
     if fmt == "sarif":
         print(to_sarif(res, spec_path=args.spec))
