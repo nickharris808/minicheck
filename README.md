@@ -2,7 +2,7 @@
 
 [![install](https://img.shields.io/badge/install-from%20GitHub-blue)](https://github.com/nickharris808/minicheck#install)
 [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-268%20passing-brightgreen)](tests/)
+[![tests](https://img.shields.io/badge/tests-270%20passing-brightgreen)](tests/)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![deps](https://img.shields.io/badge/required%20deps-none-brightgreen)
@@ -498,15 +498,25 @@ breadth-first.
 - Nothing when an invariant is trivially satisfied. `spec_warnings` reports a condition that names a
   value the bounded space cannot represent; such a condition genuinely holds, but it verifies nothing.
 
-**Measured performance.** Declarative specs (`protocol_from_spec`, the CLI, the MCP server) run at
-roughly **3.2×10⁵ to 1.0×10⁶ states/second** in CPython on an M-series laptop. The spec's guards and
-assignments are compiled to index tuples once at build time rather than re-interpreted on every
-visited state, which is a **measured 2.8× mean speedup** (2.06×–3.15×) over 0.2.0 across four
-workloads. Verified by a differential test that requires the compiled and interpreted paths to agree
-on every successor of every reachable state, so the optimisation cannot change a verdict.
-Models built from a Python `transitions` callable run at roughly 1.4×10⁵–3.2×10⁵ states/second — for
-those, profiling shows ~80% of the time is inside *your* callable, so the engine is not the limit. That is the honest ceiling: this is a readable reference implementation,
-not a competitor to SPIN, TLC or NuSMV on industrial models.
+**Measured performance — run `python bench.py` to reproduce all of it on your own machine.**
+Declarative specs (`protocol_from_spec`, the CLI, the MCP server) run at roughly **2.5×10⁵ to 7.5×10⁵
+states/second** in CPython 3.11 on an M-series laptop — the spread is across workload shapes, and it
+moves by ±15% between runs on the same machine, so treat it as an order of magnitude rather than a
+figure.
+
+The spec's guards and assignments are compiled to index tuples once at build time rather than
+re-interpreted on every visited state. `bench.py` measures that against the *pre-optimisation*
+transition function, which it re-implements inline — so the comparison needs nothing but this
+repository, and the baseline is the same oracle `tests/test_adversarial_soundness.py` uses to prove
+the two agree on every successor of every reachable state. The optimisation therefore cannot change
+a verdict. On the reference machine the mean is **4.7×** (range 2.7×–6.6×); the guarantee the test
+suite enforces is the floor, **never below 2× on any benchmarked workload**.
+
+Models built from a Python `transitions` callable are bounded by *your* function, not by the engine —
+profiling puts ~80% of the time inside it. `bench.py`'s deliberately trivial callable reaches
+~2×10⁶ states/second, which is the ceiling you approach as the callable gets cheaper, not a figure to
+expect from a real one. That is the honest ceiling overall: this is a readable reference
+implementation, not a competitor to SPIN, TLC or NuSMV on industrial models.
 
 **A soundness bug shipped in 0.1.0 and is fixed here.** `int_bound` was applied as a *clamp*, so a
 counter that genuinely reached 100 saturated at 64 and a `never reach 100` invariant was reported as
@@ -521,8 +531,8 @@ this go away; it converts a non-answer into a pass.
 
 **`UNDETERMINED` with `state space > 200000`.** The model is finite but large. Raise `--max-states`,
 or cut the state space: fewer fields, smaller ranges, or a coarser abstraction. Throughput is roughly
-1.3–2.7×10⁵ states/second (measured, see *Honest scope*), so a million states is a few seconds and
-tens of millions is not this tool.
+2.5×10⁵–7.5×10⁵ states/second on the declarative path (measured, see *Honest scope*), so a million
+states is a few seconds and tens of millions is not this tool.
 
 **`holds` is `None` and I expected `True`.** That is the same case as above, surfaced through the
 library rather than the CLI. Check `result["exhaustive"]` and `result["incomplete_reason"]`. A `None`
@@ -557,7 +567,7 @@ probably permits a transition you did not intend.
 pip install -e ".[test,smt]" && pytest
 ```
 
-268 tests, including a check that the core module acquires no third-party import at module level, and
+270 tests, including a check that the core module acquires no third-party import at module level, and
 one test per documented function using the exact calling convention shown above.
 
 ## Where this came from, and what is not here

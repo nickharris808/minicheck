@@ -153,3 +153,45 @@ def test_every_state_count_quoted_in_the_readme_is_real():
     }
     for n in quoted:
         assert n in derived, f"README quotes 'states explored {n}', which nothing reproduces"
+
+
+def test_the_speedup_claim_holds_on_every_benchmarked_workload():
+    """The README's performance claim is a FLOOR, and this is what enforces it.
+
+    A mean is not falsifiable on someone else's hardware, so the README states the floor — never
+    below 2x on any benchmarked workload — and that is what is asserted. A regression that undid the
+    compilation would land well under 1x and turn this red. The tiny `ring` workload is excluded
+    because its runtime is at timer resolution, where the ratio is noise rather than measurement.
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    try:
+        import bench
+    finally:
+        sys.path.pop(0)
+
+    for spec in bench.WORKLOADS:
+        t_new, n_new = bench.timed(bench.protocol_from_spec(spec))
+        t_old, n_old = bench.timed(bench.as_interpreted(spec))
+        assert n_new == n_old, f"{spec['name']}: the two paths explored different spaces"
+        if n_new < 1000:
+            continue  # at timer resolution; the differential test covers correctness here
+        assert t_old / t_new >= 2.0, (
+            f"{spec['name']}: compiled is only {t_old / t_new:.2f}x the interpreted path; "
+            "the README claims a floor of 2x"
+        )
+
+
+def test_the_readme_points_at_the_script_that_reproduces_its_numbers():
+    """An unreproducible number is a claim that outruns the code."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert (root / "bench.py").exists()
+    assert "python bench.py" in readme
+    # The superseded claim compared against a release that is not in this repository.
+    assert "over 0.2.0" not in readme
