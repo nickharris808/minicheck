@@ -1,0 +1,18 @@
+# 120 rather than 88/100: the checker core and the protocol models carry long explanatory
+# docstrings and aligned transition tables that read worse when wrapped. This is the width the
+# code actually holds to.
+line-length = 120
+target-version = "py39"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = [
+  "E731",   # `f = lambda ...` is clearer than a def for one-line test fixtures
+  "UP045",  # keep `Optional[X]` explicit; this package supports 3.9 readers
+]
+
+[lint.per-file-ignores]
+"*/tests/*" = ["E501"]
+
+[format]
+quote-style = "double"
