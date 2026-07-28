@@ -34,12 +34,12 @@ def collected_tests() -> int:
 
 
 def source_lines() -> int:
-    return sum(len(p.read_text().splitlines()) for p in sorted((ROOT / "src").rglob("*.py")))
+    return sum(len(p.read_text(encoding="utf-8").splitlines()) for p in sorted((ROOT / "src").rglob("*.py")))
 
 
 def test_every_test_count_in_the_readme_is_the_real_one():
     actual = collected_tests()
-    text = README.read_text()
+    text = README.read_text(encoding="utf-8")
 
     badges = [int(m) for m in re.findall(r"tests-(\d+)", text)]
     assert badges, "README has no tests badge"
@@ -56,7 +56,7 @@ def test_line_count_claims_are_close_to_the_truth():
     Cross-links quote a sibling package's size, so a figure that matches no local file is only
     flagged when it is not attached to a link.
     """
-    text = README.read_text()
+    text = README.read_text(encoding="utf-8")
     actual = source_lines()
     for match in re.finditer(r"~(\d+) lines", text):
         claimed = int(match.group(1))
@@ -68,14 +68,14 @@ def test_line_count_claims_are_close_to_the_truth():
 
 
 def test_no_placeholder_text_shipped():
-    text = README.read_text().lower()
+    text = README.read_text(encoding="utf-8").lower()
     for marker in ("todo", "fixme", "coming soon", "lorem ipsum", "placeholder"):
         assert marker not in text, f"README still contains {marker!r}"
 
 
 def test_readme_states_what_the_tool_does_not_establish():
     """Every package must carry an explicit scope section. Silence about limits reads as absence."""
-    text = README.read_text()
+    text = README.read_text(encoding="utf-8")
     assert re.search(r"^#+ .*(honest scope|limitations|what this does not)", text, re.M | re.I), (
         "README has no section stating the tool's limits"
     )

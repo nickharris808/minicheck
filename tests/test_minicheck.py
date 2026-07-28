@@ -237,7 +237,7 @@ def test_core_module_imports_only_stdlib_at_module_level():
 
     import minicheck._core as core
 
-    src = pathlib.Path(core.__file__).read_text()
+    src = pathlib.Path(core.__file__).read_text(encoding="utf-8")
     module_level = [
         ln.strip() for ln in src.splitlines() if (ln.startswith("import ") or ln.startswith("from ")) and "z3" not in ln
     ]
