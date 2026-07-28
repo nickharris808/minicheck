@@ -79,3 +79,77 @@ def test_readme_states_what_the_tool_does_not_establish():
     assert re.search(r"^#+ .*(honest scope|limitations|what this does not)", text, re.M | re.I), (
         "README has no section stating the tool's limits"
     )
+
+
+# --------------------------------------------------------------- the tutorial must be reproducible
+TUTORIAL_BROKEN = {
+    "name": "retry",
+    "fields": ["tries", "done"],
+    "initial": {"tries": 0, "done": 0},
+    "transitions": [
+        {"label": "attempt", "when": {"done": 0}, "set": {"tries": {"incr": 1}}},
+        {"label": "succeed", "when": {"done": 0}, "set": {"done": 1}},
+    ],
+    "invariants": {"at_most_3": {"forbid": {"tries": 4}}},
+    "goal": {"require": {"done": 1}},
+}
+
+TUTORIAL_FIXED = {
+    **TUTORIAL_BROKEN,
+    "transitions": [
+        {"label": "attempt1", "when": {"done": 0, "tries": 0}, "set": {"tries": {"incr": 1}}},
+        {"label": "attempt2", "when": {"done": 0, "tries": 1}, "set": {"tries": {"incr": 1}}},
+        {"label": "attempt3", "when": {"done": 0, "tries": 2}, "set": {"tries": {"incr": 1}}},
+        {"label": "succeed", "when": {"done": 0}, "set": {"done": 1}},
+    ],
+}
+
+
+def _check(spec):
+    from minicheck import check_liveness, check_safety, protocol_from_spec
+
+    model = protocol_from_spec(spec)
+    return check_safety(model), check_liveness(model)
+
+
+def test_tutorial_step_2_matches_the_readme():
+    """A tutorial whose output does not reproduce teaches the reader to distrust the tool."""
+    res, live = _check(TUTORIAL_BROKEN)
+    assert res["reachable_states"] == 129
+    assert res["exhaustive"] is False
+    assert res["properties"]["at_most_3"]["holds"] is False
+    assert len(res["properties"]["at_most_3"]["counterexample"]) == 5  # initial + 4 attempts
+    assert live["holds"] is None  # undetermined, not refuted
+
+
+def test_tutorial_step_3_matches_the_readme():
+    res, live = _check(TUTORIAL_FIXED)
+    assert res["reachable_states"] == 8
+    assert res["exhaustive"] is True
+    assert res["properties"]["at_most_3"]["holds"] is True
+    assert live["holds"] is True
+
+
+def test_tutorial_step_4_matches_the_readme():
+    spec = {**TUTORIAL_FIXED, "transitions": [t for t in TUTORIAL_FIXED["transitions"] if t["label"] != "succeed"]}
+    res, live = _check(spec)
+    assert res["reachable_states"] == 4
+    assert res["properties"]["at_most_3"]["holds"] is True
+    assert live["holds"] is False
+    assert live["counterexample"][-1]["state"] == {"tries": 0, "done": 0}
+
+
+def test_every_state_count_quoted_in_the_readme_is_real():
+    """Scrape `states explored N` from the README and re-derive each one."""
+    text = README.read_text(encoding="utf-8")
+    quoted = [int(m) for m in re.findall(r"states explored\s+([0-9,]+)", text.replace(",", ""))]
+    assert quoted, "no state counts found; the tutorial may have been removed"
+    derived = {
+        _check(TUTORIAL_BROKEN)[0]["reachable_states"],
+        _check(TUTORIAL_FIXED)[0]["reachable_states"],
+        6,  # the `minicheck example` mutex, broken
+        3,  # the same with the lock guard
+        4,  # step 4
+    }
+    for n in quoted:
+        assert n in derived, f"README quotes 'states explored {n}', which nothing reproduces"

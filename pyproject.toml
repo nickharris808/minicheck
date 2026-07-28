@@ -24,6 +24,9 @@ dependencies = []
 smt = ["z3-solver>=4.12"]
 test = ["pytest>=7"]
 
+[project.scripts]
+minicheck = "minicheck.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

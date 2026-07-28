@@ -95,13 +95,33 @@ def validate_spec(spec: dict, int_bound: int = DEFAULT_INT_BOUND) -> None:
     _require(isinstance(int_bound, int) and not isinstance(int_bound, bool), "'int_bound' must be an integer")
     _require(int_bound > 0, "'int_bound' must be positive")
     fields = spec.get("fields")
-    _require(isinstance(fields, list) and fields, "'fields' must be a non-empty list")
+    _require(
+        isinstance(fields, list) and fields,
+        '\'fields\' must be a non-empty list of state-variable names, e.g. ["a", "b", "lock"]',
+    )
     _require(all(isinstance(f, str) for f in fields), "every field name must be a string")
-    _require(len(set(fields)) == len(fields), "field names must be unique")
+    if len(set(fields)) != len(fields):
+        dupes = sorted({f for f in fields if fields.count(f) > 1})
+        raise SpecError(
+            f"field names must be unique, but {dupes} appear more than once. Two fields with the "
+            f"same name would be one variable, so the model would not be the one you described."
+        )
 
     init = spec.get("initial")
-    _require(isinstance(init, dict), "'initial' must be an object")
-    _require(set(init) == set(fields), "'initial' must assign exactly the declared fields")
+    _require(isinstance(init, dict), "'initial' must be an object mapping every field to its starting value")
+    if set(init) != set(fields):
+        missing = sorted(set(fields) - set(init))
+        extra = sorted(set(init) - set(fields))
+        parts = []
+        if missing:
+            parts.append(f"missing {missing}")
+        if extra:
+            parts.append(f"unknown {extra}")
+        raise SpecError(
+            f"'initial' must assign exactly the declared fields {sorted(fields)}, but it is "
+            f"{' and '.join(parts)}. Give every field a starting value and remove any name that "
+            f"is not in 'fields'."
+        )
     for f, v in init.items():
         _require(
             _in_bound(v, int_bound),
@@ -109,7 +129,12 @@ def validate_spec(spec: dict, int_bound: int = DEFAULT_INT_BOUND) -> None:
         )
 
     trans = spec.get("transitions")
-    _require(isinstance(trans, list) and trans, "'transitions' must be a non-empty list")
+    _require(
+        isinstance(trans, list) and trans,
+        "'transitions' must be a non-empty list. Each entry needs a 'set', and optionally a "
+        "'when' guard and a 'label', e.g. "
+        '{"label": "enter", "when": {"lock": 0}, "set": {"lock": 1}}',
+    )
     for i, t in enumerate(trans):
         _require(isinstance(t, dict), f"transition {i} must be an object")
         _require(isinstance(t.get("label", ""), str), f"transition {i}: 'label' must be a string")

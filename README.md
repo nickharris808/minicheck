@@ -2,12 +2,12 @@
 
 [![install](https://img.shields.io/badge/install-from%20GitHub-blue)](https://github.com/nickharris808/minicheck#install)
 [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-99%20passing-brightgreen)](tests/)
+[![tests](https://img.shields.io/badge/tests-128%20passing-brightgreen)](tests/)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![deps](https://img.shields.io/badge/required%20deps-none-brightgreen)
 
-**An explicit-state model checker in ~1308 lines. Shortest counterexamples. No required dependencies.**
+**An explicit-state model checker in ~1619 lines. Shortest counterexamples. No required dependencies.**
 
 ## Why this exists
 
@@ -59,6 +59,199 @@ r["properties"]["n_below_3"]["holds"]          # False
 A `Protocol` is: named `fields`, an `initial` tuple, a `transitions` function returning
 `[(label, next_state), ...]`, a dict of `invariants` over `{field: value}`, and an optional liveness
 `goal`.
+
+## Command line
+
+No Python needed. Write the state machine as JSON and check it:
+
+```console
+$ minicheck example > spec.json
+$ minicheck check spec.json
+REFUTED
+
+  states explored   6
+  exhaustive        yes
+
+  [REFUTED]      not_both — violated in 2 steps
+        0  (initial)        a=0, b=0, lock=0
+        1  a_enter          a=1, b=0, lock=1
+        2  b_enter          a=1, b=1, lock=1
+$ echo $?
+2
+```
+
+Add the missing `lock` guard to both `when` clauses and it proves:
+
+```console
+$ minicheck check spec.json
+PROVED
+
+  states explored   3
+  exhaustive        yes
+
+  [proved]       not_both
+$ echo $?
+0
+```
+
+### Exit codes
+
+Designed for CI, so the shell sees the verdict:
+
+| Code | Verdict | Meaning |
+|---|---|---|
+| `0` | `PROVED` | the whole reachable space was enumerated; nothing violated an invariant |
+| `2` | `REFUTED` | a counterexample was found. It is printed, and it replays |
+| `3` | `UNDETERMINED` | **the search did not finish, so nothing was established** |
+| `4` | `BAD SPEC` | the file is not a well-formed spec; the message names the key |
+
+**3 is deliberately not 0.** A gate that treats "I could not tell" as success is exactly the failure
+this package exists to prevent. Pass `--allow-undetermined` if you consciously want it to pass —
+that flag widens only the undetermined case and never masks a real counterexample.
+
+```yaml
+# in a workflow
+- run: pip install "minicheck @ git+https://github.com/nickharris808/minicheck.git"
+- run: minicheck check protocol.json
+```
+
+### Commands and flags
+
+| | |
+|---|---|
+| `minicheck check SPEC` | check invariants, and liveness if the spec has a `goal` |
+| `minicheck validate SPEC` | schema-check only. Does not run the search, so it terminates on any spec |
+| `minicheck example` | print a worked spec to stdout |
+| `--json` | machine-readable output, including `exit_code` and `incomplete_reason` |
+| `--int-bound N` | largest magnitude an integer field may take (default 64) |
+| `--max-states N` | stop after this many reachable states (default 200000) |
+| `--allow-undetermined` | exit 0 instead of 3 when the search does not finish |
+
+`SPEC` may be `-` to read from stdin.
+
+## Tutorial — from a bug to a proof
+
+A worked end-to-end pass over a retry loop, the kind of thing that ships unchecked because it "looks
+obviously right". Every console block below is real output; you can reproduce it verbatim.
+
+**The claim to check.** *A request is retried at most three times, and always finishes.*
+
+**1. Write it down.** Save as `retry.json`:
+
+```json
+{
+  "name": "retry",
+  "fields": ["tries", "done"],
+  "initial": {"tries": 0, "done": 0},
+  "transitions": [
+    {"label": "attempt", "when": {"done": 0}, "set": {"tries": {"incr": 1}}},
+    {"label": "succeed", "when": {"done": 0}, "set": {"done": 1}}
+  ],
+  "invariants": {"at_most_3": {"forbid": {"tries": 4}}},
+  "goal": {"require": {"done": 1}}
+}
+```
+
+**2. Check it.**
+
+```console
+$ minicheck check retry.json
+REFUTED
+
+  states explored   129
+  exhaustive        NO
+  stopped because   IntBoundExceeded: transition 'attempt' drives field 'tries' to 65, outside int_bound 64. The state space is not finite under this bound, so no exhaustive verdict is available. Re-run with int_bound >= 65.
+
+  [REFUTED]      at_most_3 — violated in 4 steps
+        0  (initial)        tries=0, done=0
+        1  attempt          tries=1, done=0
+        2  attempt          tries=2, done=0
+        3  attempt          tries=3, done=0
+        4  attempt          tries=4, done=0
+
+  [undetermined] liveness — every reachable state can still reach the goal
+
+  To get a definite answer, either raise --int-bound, or add a 'when' guard so
+  the growing field stops. An undetermined result is not a pass.
+$ echo $?
+2
+```
+
+Three things are happening at once, and it is worth separating them.
+
+* **`at_most_3` is REFUTED** — the exact four steps that break it. Nothing bounds `attempt`, so it
+  fires forever. This verdict is trustworthy even though the search never finished: a counterexample
+  carries its own witness, and that trace replays.
+* **`exhaustive NO`** — `tries` grows without limit, so the search stopped at the bound rather than
+  saturating there and reporting a proof it had not performed.
+* **liveness is `undetermined`, not refuted** — proving that *every* state can still reach the goal
+  is a claim about the whole space, and the whole space was not explored. So it abstains.
+
+**3. Fix it.** Guard each attempt on the counter, so the loop is genuinely bounded:
+
+```json
+{
+  "name": "retry",
+  "fields": ["tries", "done"],
+  "initial": {"tries": 0, "done": 0},
+  "transitions": [
+    {"label": "attempt1", "when": {"done": 0, "tries": 0}, "set": {"tries": {"incr": 1}}},
+    {"label": "attempt2", "when": {"done": 0, "tries": 1}, "set": {"tries": {"incr": 1}}},
+    {"label": "attempt3", "when": {"done": 0, "tries": 2}, "set": {"tries": {"incr": 1}}},
+    {"label": "succeed",  "when": {"done": 0},             "set": {"done": 1}}
+  ],
+  "invariants": {"at_most_3": {"forbid": {"tries": 4}}},
+  "goal": {"require": {"done": 1}}
+}
+```
+
+```console
+$ minicheck check retry.json
+PROVED
+
+  states explored   8
+  exhaustive        yes
+
+  [proved]       at_most_3
+
+  [proved]       liveness — every reachable state can still reach the goal
+$ echo $?
+0
+```
+
+Eight states, all of them examined. That is a proof over the model, not a sample of it.
+
+**4. See what the liveness check is actually doing.** Delete the `succeed` transition and re-run:
+
+```console
+$ minicheck check retry.json
+REFUTED
+
+  states explored   4
+  exhaustive        yes
+
+  [proved]       at_most_3
+
+  [REFUTED]      liveness — every reachable state can still reach the goal
+                 trap state: tries=0, done=0
+$ echo $?
+2
+```
+
+`at_most_3` still holds — the retry bound is fine. But the goal `done=1` is now unreachable from
+everywhere, including the initial state, so every state is a trap. A plain "is the goal reachable"
+check reports the same thing; the difference shows up in models where the goal *is* reachable down
+one branch and permanently lost down another. AG-EF catches that; reachability does not.
+
+**5. Put it in CI.**
+
+```yaml
+- run: pip install "minicheck @ git+https://github.com/nickharris808/minicheck.git"
+- run: minicheck check retry.json
+```
+
+Exit 0 as it stands, 2 if someone removes a guard, 3 if a later edit makes the space unbounded again.
+All three are the right answer, and none of them is a silent pass.
 
 ## Worked example — a mutual-exclusion bug, found and fixed
 
@@ -196,13 +389,52 @@ not a competitor to SPIN, TLC or NuSMV on industrial models.
 counter that genuinely reached 100 saturated at 64 and a `never reach 100` invariant was reported as
 holding. See [SECURITY-ADVISORY.md](SECURITY-ADVISORY.md).
 
+## Troubleshooting
+
+**`UNDETERMINED`, `exhaustive NO`, `IntBoundExceeded`.** A field grows without limit, so the space is
+not finite. Either bound it in the model — a `when` guard that stops the increment — or raise
+`--int-bound` if the real range is genuinely larger. Do not reach for `--allow-undetermined` to make
+this go away; it converts a non-answer into a pass.
+
+**`UNDETERMINED` with `state space > 200000`.** The model is finite but large. Raise `--max-states`,
+or cut the state space: fewer fields, smaller ranges, or a coarser abstraction. Throughput is roughly
+1.3–2.7×10⁵ states/second (measured, see *Honest scope*), so a million states is a few seconds and
+tens of millions is not this tool.
+
+**`holds` is `None` and I expected `True`.** That is the same case as above, surfaced through the
+library rather than the CLI. Check `result["exhaustive"]` and `result["incomplete_reason"]`. A `None`
+is never a pass.
+
+**`warning: ... trivially satisfied`.** An invariant names a value the bounded space cannot
+represent, so it holds for a reason unrelated to your protocol. Usually a typo in the literal, or an
+`int_bound` set below the value you meant to forbid.
+
+**`SpecError: 'initial' must assign exactly the declared fields`.** Every name in `fields` needs a
+starting value, and `initial` may not name anything else. The message lists what is missing and what
+is unknown.
+
+**`ValueError: composed models must have disjoint field names`.** `check_composition` keys the
+product state by field name, so two components both called `x` would silently become one variable.
+Prefix them with the component name.
+
+**`prove_inductive` returns `vacuous: True`.** The encoding makes every obligation trivially valid —
+usually `decls()` returning the *same* z3 variable for the current and next state, which makes the
+transition relation unsatisfiable. Return two disjoint copies.
+
+**`{"available": false}` from a `prove_*` function.** z3 is not installed. `pip install
+"minicheck[smt] @ git+https://github.com/nickharris808/minicheck.git"`. The BFS half never needs it.
+
+**The counterexample looks longer than necessary.** It is not — the search is breadth-first, so the
+first violating state found is at minimum depth. If a shorter path exists in your head, the model
+probably permits a transition you did not intend.
+
 ## Tests
 
 ```
 pip install -e ".[test,smt]" && pytest
 ```
 
-99 tests, including a check that the core module acquires no third-party import at module level, and
+128 tests, including a check that the core module acquires no third-party import at module level, and
 one test per documented function using the exact calling convention shown above.
 
 ## Where this came from, and what is not here
@@ -222,7 +454,7 @@ Five small, independently useful tools built around one idea: **a verdict you ca
 
 | | |
 |---|---|
-| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~1308 lines. Shortest counterexamples, no required dependencies. |
+| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~1619 lines, with a CLI. Shortest counterexamples, no required dependencies. |
 | [`protocol-bench`](https://github.com/nickharris808/protocol-bench) | 15 published IEEE 802.11 / 3GPP procedures with ground truth. A claimed detection must **replay**. |
 | [`minicheck-mcp`](https://github.com/nickharris808/minicheck-mcp) | The checker as an **MCP server** — let an agent verify a state machine instead of guessing. |
 | [`polyfrac`](https://github.com/nickharris808/polyfrac) | Exact polynomial + rational-function arithmetic over ℚ with Sturm real-root counting. Zero deps. |
