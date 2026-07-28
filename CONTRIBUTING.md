@@ -1,37 +1,76 @@
 # Contributing to minicheck
 
-A small, readable, dependency-free engine is the point of this package. That shapes what changes are easy to
-accept.
+Contributions are welcome. Most of this is one rule.
 
-## Ground rules
+## The rule
 
-1. **No dependencies.** Standard library only. A pull request that adds a runtime dependency will be
-   declined regardless of merit — depend on `minicheck` from your own package instead.
-2. **z3 stays optional and lazy.** The BFS engine must keep working with no third-party package
-   installed. There is a test that enforces this by reading the module-level imports.
-3. **Counterexamples stay shortest.** The search is breadth-first for that reason. A change that makes
-   it depth-first, or that returns the first violation found by a non-BFS route, changes a documented
-   guarantee.
+**No change may let this tool give a confident answer it has not earned.**
 
-## Getting set up
+Everything else is negotiable. That is not. A change is unlikely to be accepted if it lets a verdict
+be reported from an analysis that did not establish it, maps an undetermined result onto something a
+downstream system renders as success, or silently coerces input rather than refusing it.
 
-```
-python -m venv .venv && . .venv/bin/activate
+Unsure whether a change crosses that line? Open an issue first — much easier before the code exists.
+
+## Reporting a false verdict
+
+The most valuable bug report you can send, and it takes priority. **Include the input.**
+
+If this tool told you something was proved and it was not, that is a security-grade defect. Earlier
+ones in this portfolio got public advisories; the response is disclosure plus a regression test, not
+a quiet patch.
+
+## Setup
+
+```console
+git clone https://github.com/nickharris808/minicheck.git
+cd minicheck
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
-pytest
+pytest -q
 ```
 
-## Pull requests
+Some tests need extra tools and **skip** without them, so a green local run can be less green
+than it looks:
 
-- Add a test that fails before your change and passes after. Tests live in `tests/`.
-- Keep the public API in `__all__` explicit; anything not listed there is internal.
-- If you change the shape of a returned dict, say so loudly — callers index these keys directly.
-- `check_liveness` is AG-EF (every reachable state can still reach a goal), not plain reachability.
-  Please do not "simplify" it into the weaker check.
-- Sign-off by [DCO](https://developercertificate.org/) (`git commit -s`). There is no CLA.
+- `spin` and a C compiler — the export differential against SPIN. CI installs SPIN, so it runs there
+  regardless. Install it if you are touching `export.py`.
+- `pip install -e ".[smt]"` for the z3-backed induction tests.
 
-## Reporting a wrong answer
+## What a good test looks like
 
-A missed counterexample — `holds: True` for a model that can actually violate the invariant — is the
-most serious possible bug here. If you find one, please include the `Protocol` definition in full, so
-it can go straight into the test suite.
+Three kinds, in increasing order of worth:
+
+1. **Unit tests** — they ask whether the code agrees with itself. Necessary, least informative.
+2. **Adversarial tests** — malformed, empty, enormous, out-of-distribution input, with one oracle:
+   *no input may produce a confident-looking answer that is wrong.*
+3. **Differential tests** — the best. Check against an independent implementation of the same
+   question.
+
+**Mutation-test your regression test.** Reintroduce the bug and confirm the test goes red. A test
+that passes on both the broken and the fixed code is worth nothing.
+
+## Numbers in documentation
+
+`tests/test_readme_claims.py` re-derives every numeric claim in the README. If you change the test
+count or add source, it fails until the README matches. That is working as intended — never write a
+number the published code cannot reproduce.
+
+## Style
+
+- `ruff check .` and `ruff format --check .` must pass; line length 120.
+- Comments explain **why**. The code says what.
+- Error messages name the fix, not just the fault.
+
+## Responsible disclosure
+
+Do not add findings or verdicts about **named** third-party products, vendors or protocols. Ship the
+checker and the methodology.
+
+## Licence
+
+MIT. By contributing you agree your contribution is licensed the same way.
+
+---
+
+Portfolio-wide guidance: <https://nickharris808.github.io/verification-docs/guides/contributing/>

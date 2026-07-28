@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "minicheck"
+abstract: "An explicit-state model checker with shortest counterexamples and a three-valued verdict"
+type: software
+authors:
+  - family-names: Harris
+    given-names: Nick
+repository-code: "https://github.com/nickharris808/minicheck"
+url: "https://nickharris808.github.io/verification-docs/"
+license: MIT
+keywords:
+  - formal methods
+  - model checking
+  - verification

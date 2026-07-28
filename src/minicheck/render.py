@@ -38,28 +38,44 @@ def _fmt(state: dict) -> str:
 
 
 def _collect(model, max_nodes: int):
-    """Reachable states and edges, in BFS order, or refuse if too large."""
+    """Reachable states and edges in BFS order, plus whether the walk finished.
+
+    Returns ``(order, edges, complete)``. ``complete`` is False when the model refused to expand —
+    an unbounded integer field raising `IntBoundExceeded` mid-walk. That is not a rendering error
+    and must not crash the caller: a partial picture of a machine whose space is not finite is
+    still useful, as long as the diagram *says* it is partial. Silently drawing it as though it
+    were the whole graph would be the visual form of a truncated proof.
+
+    Exceeding ``max_nodes`` is different and still refuses outright — that is a legibility limit,
+    not a property of the model.
+    """
     from collections import deque
+
+    from ._core import SearchIncomplete
 
     order = [model.initial]
     seen = {model.initial}
     edges = []
+    complete = True
     q = deque([model.initial])
-    while q:
-        s = q.popleft()
-        for label, ns in model.transitions(s):
-            edges.append((s, label, ns))
-            if ns not in seen:
-                if len(seen) >= max_nodes:
-                    raise RenderTooLarge(
-                        f"the reachable graph exceeds {max_nodes} states, which does not render "
-                        f"legibly. Raise max_nodes if you really want it, or narrow the model — a "
-                        f"diagram is for understanding one counterexample, not surveying a space."
-                    )
-                seen.add(ns)
-                order.append(ns)
-                q.append(ns)
-    return order, edges
+    try:
+        while q:
+            s = q.popleft()
+            for label, ns in model.transitions(s):
+                edges.append((s, label, ns))
+                if ns not in seen:
+                    if len(seen) >= max_nodes:
+                        raise RenderTooLarge(
+                            f"the reachable graph exceeds {max_nodes} states, which does not render "
+                            f"legibly. Raise max_nodes if you really want it, or narrow the model — a "
+                            f"diagram is for understanding one counterexample, not surveying a space."
+                        )
+                    seen.add(ns)
+                    order.append(ns)
+                    q.append(ns)
+    except SearchIncomplete:
+        complete = False
+    return order, edges, complete
 
 
 def _trace_states(counterexample, fields) -> list:
@@ -75,13 +91,15 @@ def to_mermaid(model, counterexample=None, *, verdict=None, max_nodes: int = DEF
     The counterexample path is drawn in red and its steps numbered, so the order is unambiguous —
     a highlighted subgraph without ordering leaves the reader to guess which edge came first.
     """
-    order, edges = _collect(model, max_nodes)
+    order, edges, complete = _collect(model, max_nodes)
     ids = {s: f"S{i}" for i, s in enumerate(order)}
     path = _trace_states(counterexample, model.fields)
 
     out = ["stateDiagram-v2"]
     if verdict is not None:
         out.append(f"    %% verdict: {Verdict(verdict).value}")
+    if not complete:
+        out.append("    %% PARTIAL: the state space is not finite under this bound; more states exist")
     out.append(f"    [*] --> {ids[model.initial]}")
     for s in order:
         out.append(f"    {ids[s]} : {_fmt(model.d(s))}")
@@ -105,7 +123,7 @@ def to_mermaid(model, counterexample=None, *, verdict=None, max_nodes: int = DEF
 
 def to_dot(model, counterexample=None, *, verdict=None, max_nodes: int = DEFAULT_MAX_NODES) -> str:
     """Graphviz DOT. `dot -Tpng out.dot -o out.png`."""
-    order, edges = _collect(model, max_nodes)
+    order, edges, complete = _collect(model, max_nodes)
     ids = {s: f"s{i}" for i, s in enumerate(order)}
     path = _trace_states(counterexample, model.fields)
     on_path = set(path)
@@ -113,7 +131,12 @@ def to_dot(model, counterexample=None, *, verdict=None, max_nodes: int = DEFAULT
 
     out = ["digraph counterexample {", "  rankdir=LR;", '  node [shape=box, fontname="monospace"];']
     if verdict is not None:
-        out.append(f'  label="verdict: {Verdict(verdict).value}"; labelloc=t;')
+        label = f"verdict: {Verdict(verdict).value}"
+        if not complete:
+            label += "  (PARTIAL: more states exist beyond the bound)"
+        out.append(f'  label="{label}"; labelloc=t;')
+    elif not complete:
+        out.append('  label="PARTIAL: more states exist beyond the bound"; labelloc=t;')
     for s in order:
         style = ' style=filled fillcolor="#ffdddd" color="#cc0000"' if s in on_path else ""
         out.append(f'  {ids[s]} [label="{_fmt(model.d(s))}"{style}];')

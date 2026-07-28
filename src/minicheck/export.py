@@ -36,6 +36,25 @@ def _ident(name: str) -> str:
     return out
 
 
+def _ident_map(fields) -> dict:
+    """Field name -> a UNIQUE target identifier.
+
+    Sanitising is many-to-one: ``a-b`` and ``a_b`` both become ``a_b``. Applying `_ident`
+    independently to each field would therefore emit two variables with the same name, silently
+    merging two independent pieces of state — so the exported model would be a *different machine*
+    than the one that was checked. Collisions get a numeric suffix instead.
+    """
+    mapping, used = {}, set()
+    for f in fields:
+        base = _ident(f)
+        cand, k = base, 2
+        while cand in used:
+            cand, k = f"{base}_{k}", k + 1
+        used.add(cand)
+        mapping[f] = cand
+    return mapping
+
+
 def _values_of(spec: dict, field: str) -> list:
     """Every literal a field is compared against or assigned, for range inference."""
     seen = [spec["initial"][field]]
@@ -66,14 +85,24 @@ def _check_exportable(spec: dict) -> None:
             )
 
 
-def _cond_expr(cond: dict, op_and: str, eq: str = "==") -> str:
-    """Render a forbid/require body as a boolean expression in the target syntax."""
+def _cond_expr(cond: dict, op_and: str, eq: str = "==", idents: dict | None = None) -> str:
+    """Render a forbid/require body as a boolean expression in the target syntax.
+
+    **Always parenthesised**, including the single-condition case. That is not cosmetic: callers
+    negate the result with a prefix operator, and `!` binds tighter than `==` in Promela and C. An
+    earlier version omitted the parentheses when there was only one condition, so a `forbid` on one
+    field exported as ``!f0 == 2`` — which parses as ``(!f0) == 2`` and is *always false*. Every
+    generated model with a single-field invariant therefore asserted a property that fires
+    immediately, and SPIN dutifully reported a violation of something the spec never said.
+
+    Found by a differential sweep against SPIN. The hand-written test models all happened to use
+    two-field invariants, where the parentheses were already being added.
+    """
     kind, body = next(iter(cond.items()))
-    parts = [f"{_ident(f)} {eq} {int(v) if isinstance(v, bool) else v}" for f, v in body.items()]
+    ident = (lambda f: idents[f]) if idents else _ident
+    parts = [f"{ident(f)} {eq} {int(v) if isinstance(v, bool) else v}" for f, v in body.items()]
     conj = f" {op_and} ".join(parts) if parts else "TRUE"
-    if len(parts) > 1:
-        conj = f"({conj})"
-    return conj, kind
+    return f"({conj})", kind
 
 
 def to_promela(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
@@ -90,6 +119,7 @@ def to_promela(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
     _check_exportable(spec)
 
     fields = list(spec["fields"])
+    idents = _ident_map(fields)
     name = _ident(spec.get("name", "spec"))
     lines = [
         f"/* Generated from a minicheck spec: {spec.get('name', 'spec')}",
@@ -104,24 +134,32 @@ def to_promela(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
     ]
     for f in fields:
         init = spec["initial"][f]
-        lines.append(f"int {_ident(f)} = {int(init) if isinstance(init, bool) else init};")
+        lines.append(f"int {idents[f]} = {int(init) if isinstance(init, bool) else init};")
     lines.append("")
 
     invs = spec.get("invariants") or {}
     if invs:
         lines.append("/* Safety invariants. `forbid` fails when every listed field matches. */")
         for inv_name, cond in invs.items():
-            expr, kind = _cond_expr(cond, "&&")
+            expr, kind = _cond_expr(cond, "&&", idents=idents)
             neg = f"!{expr}" if kind == "forbid" else expr
             lines.append(f"#define {_ident(inv_name)} ({neg})")
         lines.append("")
 
     lines.append(f"active proctype {name}() {{")
+    if invs:
+        # The initial state must be checked BEFORE any transition fires. Asserting only inside the
+        # transition bodies misses a model that is already broken at step zero — minicheck reports
+        # that as a zero-step counterexample, and an export that cannot see it would have SPIN
+        # calling a broken model fine. Found by a differential sweep against SPIN.
+        lines.append("  /* the initial state is a reachable state, so it is checked too */")
+        for inv_name in invs:
+            lines.append(f"  assert({_ident(inv_name)});")
     lines.append("  do")
     for i, t in enumerate(spec["transitions"]):
         label = t.get("label", f"t{i}")
         guard_parts = [
-            f"{_ident(f)} == {int(v) if isinstance(v, bool) else v}" for f, v in (t.get("when") or {}).items()
+            f"{idents[f]} == {int(v) if isinstance(v, bool) else v}" for f, v in (t.get("when") or {}).items()
         ]
         guard = " && ".join(guard_parts) if guard_parts else "true"
         lines.append(f"  :: {guard} ->")
@@ -131,13 +169,13 @@ def to_promela(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
                 delta = val.get("incr", 0) - val.get("decr", 0)
                 # The bound is re-imposed here so SPIN explores the same space minicheck did.
                 lines.append(
-                    f"       if :: ({_ident(f)} + ({delta}) <= {int_bound} && "
-                    f"{_ident(f)} + ({delta}) >= -{int_bound}) -> {_ident(f)} = {_ident(f)} + ({delta});"
+                    f"       if :: ({idents[f]} + ({delta}) <= {int_bound} && "
+                    f"{idents[f]} + ({delta}) >= -{int_bound}) -> {idents[f]} = {idents[f]} + ({delta});"
                 )
                 lines.append("          :: else -> skip;  /* out of bound: minicheck refuses here */")
                 lines.append("       fi;")
             else:
-                lines.append(f"       {_ident(f)} = {int(val) if isinstance(val, bool) else val};")
+                lines.append(f"       {idents[f]} = {int(val) if isinstance(val, bool) else val};")
         for inv_name in invs:
             lines.append(f"       assert({_ident(inv_name)});")
         lines.append("     }")
@@ -145,7 +183,7 @@ def to_promela(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
     lines.append("}")
 
     if spec.get("goal") is not None:
-        expr, kind = _cond_expr(spec["goal"], "&&")
+        expr, kind = _cond_expr(spec["goal"], "&&", idents=idents)
         goal_expr = expr if kind == "require" else f"!{expr}"
         lines += [
             "",
@@ -169,9 +207,10 @@ def to_tla(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
     _check_exportable(spec)
 
     fields = list(spec["fields"])
+    idents = _ident_map(fields)
     mod = _ident(spec.get("name", "Spec")) or "Spec"
     mod = mod[0].upper() + mod[1:]
-    vs = ", ".join(_ident(f) for f in fields)
+    vs = ", ".join(idents[f] for f in fields)
 
     def lit(v):
         return int(v) if isinstance(v, bool) else v
@@ -193,9 +232,9 @@ def to_tla(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
         f"VARIABLES {vs}",
         f"vars == <<{vs}>>",
         "",
-        "TypeOK == " + " /\\ ".join(f"{_ident(f)} \\in -{int_bound}..{int_bound}" for f in fields),
+        "TypeOK == " + " /\\ ".join(f"{idents[f]} \\in -{int_bound}..{int_bound}" for f in fields),
         "",
-        "Init == " + " /\\ ".join(f"{_ident(f)} = {lit(spec['initial'][f])}" for f in fields),
+        "Init == " + " /\\ ".join(f"{idents[f]} = {lit(spec['initial'][f])}" for f in fields),
         "",
     ]
 
@@ -203,18 +242,18 @@ def to_tla(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
     for i, t in enumerate(spec["transitions"]):
         label = _ident(t.get("label", f"t{i}"))
         actions.append(label)
-        guard = [f"{_ident(f)} = {lit(v)}" for f, v in (t.get("when") or {}).items()] or ["TRUE"]
+        guard = [f"{idents[f]} = {lit(v)}" for f, v in (t.get("when") or {}).items()] or ["TRUE"]
         updates, unchanged = [], []
         for f in fields:
             if f in t["set"]:
                 val = t["set"][f]
                 if isinstance(val, dict):
                     delta = val.get("incr", 0) - val.get("decr", 0)
-                    updates.append(f"{_ident(f)}' = {_ident(f)} + ({delta})")
+                    updates.append(f"{idents[f]}' = {idents[f]} + ({delta})")
                 else:
-                    updates.append(f"{_ident(f)}' = {lit(val)}")
+                    updates.append(f"{idents[f]}' = {lit(val)}")
             else:
-                unchanged.append(_ident(f))
+                unchanged.append(idents[f])
         body = guard + updates
         if unchanged:
             body.append("UNCHANGED <<" + ", ".join(unchanged) + ">>")
@@ -231,10 +270,10 @@ def to_tla(spec: dict, *, int_bound: int = DEFAULT_INT_BOUND) -> str:
     lines.append("")
 
     for inv_name, cond in (spec.get("invariants") or {}).items():
-        expr, kind = _cond_expr(cond, "/\\", eq="=")
+        expr, kind = _cond_expr(cond, "/\\", eq="=", idents=idents)
         lines.append(f"{_ident(inv_name)} == " + (f"~{expr}" if kind == "forbid" else expr))
     if spec.get("goal") is not None:
-        expr, kind = _cond_expr(spec["goal"], "/\\", eq="=")
+        expr, kind = _cond_expr(spec["goal"], "/\\", eq="=", idents=idents)
         lines.append("")
         lines.append("(* minicheck checks AG-EF; the nearest TLA+ property is below. *)")
         lines.append("Goal == " + (expr if kind == "require" else f"~{expr}"))

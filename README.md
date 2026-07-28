@@ -2,12 +2,12 @@
 
 [![install](https://img.shields.io/badge/install-from%20GitHub-blue)](https://github.com/nickharris808/minicheck#install)
 [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-229%20passing-brightgreen)](tests/)
+[![tests](https://img.shields.io/badge/tests-268%20passing-brightgreen)](tests/)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![deps](https://img.shields.io/badge/required%20deps-none-brightgreen)
 
-**An explicit-state model checker in ~2826 lines. Shortest counterexamples. No required dependencies.**
+**An explicit-state model checker in ~2888 lines. Shortest counterexamples. No required dependencies.**
 
 ## Why this exists
 
@@ -557,7 +557,7 @@ probably permits a transition you did not intend.
 pip install -e ".[test,smt]" && pytest
 ```
 
-229 tests, including a check that the core module acquires no third-party import at module level, and
+268 tests, including a check that the core module acquires no third-party import at module level, and
 one test per documented function using the exact calling convention shown above.
 
 ## Where this came from, and what is not here
@@ -577,7 +577,7 @@ Five small, independently useful tools built around one idea: **a verdict you ca
 
 | | |
 |---|---|
-| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~2826 lines, with a CLI. Shortest counterexamples, no required dependencies. |
+| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~2888 lines, with a CLI. Shortest counterexamples, no required dependencies. |
 | [`protocol-bench`](https://github.com/nickharris808/protocol-bench) | 15 published IEEE 802.11 / 3GPP procedures with ground truth. A claimed detection must **replay**. |
 | [`minicheck-mcp`](https://github.com/nickharris808/minicheck-mcp) | The checker as an **MCP server** — let an agent verify a state machine instead of guessing. |
 | [`polyfrac`](https://github.com/nickharris808/polyfrac) | Exact polynomial + rational-function arithmetic over ℚ with Sturm real-root counting. Zero deps. |
