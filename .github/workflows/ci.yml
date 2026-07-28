@@ -49,3 +49,21 @@ jobs:
       - run: twine check dist/*
       - uses: actions/upload-artifact@v4
         with: {name: dist, path: dist/}
+
+  # Install the package ALONE, exactly as a stranger would, with nothing pre-installed and no
+  # editable mode. This is the job that catches an unresolvable dependency: `pip install -e .` in
+  # the `test` job above resolves the source tree first, so a dependency that 404s on PyPI stays
+  # invisible there. That is how a package whose only dependency is unpublished shipped green.
+  clean-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Install from a built wheel into a fresh environment
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install --upgrade pip
+          /tmp/fresh/bin/pip install .
+      - name: Import it outside the source tree
+        run: cd /tmp && /tmp/fresh/bin/python -c "import minicheck; print(minicheck.__name__, 'imported')"
