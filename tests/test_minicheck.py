@@ -139,7 +139,12 @@ def test_liveness_distinguishes_a_trap_from_mere_reachability():
     assert r["counterexample"][-1]["state"]["n"] == 2
 
 
-def test_liveness_without_a_goal_is_vacuously_true():
+def test_liveness_without_a_goal_is_undetermined_not_true():
+    """No goal is an unasked question, not a satisfied property.
+
+    This previously returned ``holds=True``, which reads as "liveness verified" to any caller doing
+    ``if result["holds"]``. A model with no goal has no liveness evidence either way.
+    """
     m = Protocol(
         name="nogoal",
         candidate=False,
@@ -148,7 +153,9 @@ def test_liveness_without_a_goal_is_vacuously_true():
         transitions=lambda s: [],
         invariants={"trivial": lambda d: True},
     )
-    assert check_liveness(m)["holds"] is True
+    res = check_liveness(m)
+    assert res["holds"] is None
+    assert "undetermined" in res["note"]
 
 
 # --------------------------------------------------------------------------- bounded time

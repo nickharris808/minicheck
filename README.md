@@ -2,12 +2,12 @@
 
 [![install](https://img.shields.io/badge/install-from%20GitHub-blue)](https://github.com/nickharris808/minicheck#install)
 [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-44%20passing-brightgreen)](tests/)
+[![tests](https://img.shields.io/badge/tests-99%20passing-brightgreen)](tests/)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![deps](https://img.shields.io/badge/required%20deps-none-brightgreen)
 
-**An explicit-state model checker in ~560 lines. Shortest counterexamples. No required dependencies.**
+**An explicit-state model checker in ~1308 lines. Shortest counterexamples. No required dependencies.**
 
 ## Why this exists
 
@@ -155,11 +155,44 @@ Those are better model checkers with more users and far more capability. Use the
 toolchain, a model file format, or a subprocess — and where being able to read the whole engine before
 you trust it matters more than raw state-space throughput.
 
-## Scope
+## Honest scope
 
-Finite and explicit: the state space must fit in memory (the sweep caps at 200,000 states by default).
-There is no partial-order reduction, no symmetry reduction, no LTL. The counterexample is shortest by
-construction because the search is breadth-first.
+**Verdicts are three-valued, and the third value is the important one.**
+
+| verdict | means | what it took to earn |
+|---|---|---|
+| `holds: true` | proved | the *entire* reachable space was enumerated and nothing violated the invariant |
+| `holds: false` | refuted | one violating state was reached; the attached trace replays |
+| `holds: None` | **undetermined** | the search stopped early. Not a pass. |
+
+The asymmetry is deliberate. Refuting a safety property needs one witness, so `false` is sound even
+from a partial search. Proving one is a claim about every reachable state, so `true` is only issued
+when `exhaustive` is also true. **Never treat `None` as success** — check `exhaustive` and
+`incomplete_reason`, which say exactly what stopped the sweep.
+
+**What it proves.** That a finite, explicitly-enumerated model does or does not satisfy an invariant,
+over every interleaving. Counterexamples are shortest by construction, because the search is
+breadth-first.
+
+**What it does not prove.**
+
+- Nothing about your *implementation*. It checks the model you wrote, and a model abstracts. An
+  abstraction can hide a real defect.
+- Nothing beyond the bound. The sweep caps at 200,000 states by default and integer fields at
+  `int_bound`. Exceeding either downgrades unrefuted invariants to `None` rather than truncating
+  silently — but it still means those states were not examined.
+- Nothing about liveness under fairness assumptions beyond the AG-EF check, and nothing in LTL.
+  There is no partial-order reduction, no symmetry reduction, and no CTL\* fragment beyond AG-EF.
+- Nothing when an invariant is trivially satisfied. `spec_warnings` reports a condition that names a
+  value the bounded space cannot represent; such a condition genuinely holds, but it verifies nothing.
+
+**Measured performance.** Roughly 1.4×10⁵ to 3.2×10⁵ states/second in CPython on an M-series laptop
+(65,536 states in 0.46 s). That is the honest ceiling: this is a readable reference implementation,
+not a competitor to SPIN, TLC or NuSMV on industrial models.
+
+**A soundness bug shipped in 0.1.0 and is fixed here.** `int_bound` was applied as a *clamp*, so a
+counter that genuinely reached 100 saturated at 64 and a `never reach 100` invariant was reported as
+holding. See [SECURITY-ADVISORY.md](SECURITY-ADVISORY.md).
 
 ## Tests
 
@@ -167,7 +200,7 @@ construction because the search is breadth-first.
 pip install -e ".[test,smt]" && pytest
 ```
 
-23 tests, including a check that the core module acquires no third-party import at module level, and
+99 tests, including a check that the core module acquires no third-party import at module level, and
 one test per documented function using the exact calling convention shown above.
 
 ## Where this came from, and what is not here
@@ -187,7 +220,7 @@ Five small, independently useful tools built around one idea: **a verdict you ca
 
 | | |
 |---|---|
-| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~560 lines. Shortest counterexamples, no required dependencies. |
+| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~1308 lines. Shortest counterexamples, no required dependencies. |
 | [`protocol-bench`](https://github.com/nickharris808/protocol-bench) | 15 published IEEE 802.11 / 3GPP procedures with ground truth. A claimed detection must **replay**. |
 | [`minicheck-mcp`](https://github.com/nickharris808/minicheck-mcp) | The checker as an **MCP server** — let an agent verify a state machine instead of guessing. |
 | [`polyfrac`](https://github.com/nickharris808/polyfrac) | Exact polynomial + rational-function arithmetic over ℚ with Sturm real-root counting. Zero deps. |

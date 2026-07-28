@@ -26,17 +26,31 @@ Spec shape::
 An invariant is ``{"forbid": {...}}`` (fails when every listed field matches) or
 ``{"require": {...}}`` (fails unless every listed field matches). ``goal`` uses the same shape.
 
-Bounded by construction: integers are clamped to ``int_bound`` so a runaway counter cannot produce an
-unbounded state space.
+Bounded by construction, and the bound is CHECKED rather than silently applied. ``int_bound`` limits
+the magnitude an integer field may take. If a run would carry a field past it, the build raises
+`IntBoundExceeded` instead of saturating the value.
+
+This matters more than it looks. An earlier version *clamped* to the bound, which made a counter that
+genuinely reaches 100 stop at 64 — so a "never reach 100" invariant was reported as HOLDING when it
+does not. A truncated search that reports success is a false proof, and a false proof from a verifier
+is worse than no verifier. The rule here is: when the analysis cannot cover the state space, say so
+and refuse; never return a confident verdict the search did not earn.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from ._core import Protocol
+from ._core import Protocol, SearchIncomplete
 
-__all__ = ["SpecError", "protocol_from_spec", "validate_spec"]
+__all__ = [
+    "SpecError",
+    "IntBoundExceeded",
+    "protocol_from_spec",
+    "validate_spec",
+    "spec_warnings",
+    "DEFAULT_INT_BOUND",
+]
 
 DEFAULT_INT_BOUND = 64
 
@@ -45,14 +59,41 @@ class SpecError(ValueError):
     """The spec is malformed. The message names the offending key."""
 
 
+class IntBoundExceeded(SpecError, SearchIncomplete):
+    """An integer field left the declared ``int_bound``, so the search could not be exhaustive.
+
+    Raised rather than clamping the value, because clamping silently shrinks the state space and
+    turns "I did not look there" into "it holds". Raise ``int_bound`` to cover the real range, or
+    treat this as an explicit refusal to answer.
+    """
+
+
 def _require(cond: bool, msg: str) -> None:
     if not cond:
         raise SpecError(msg)
 
 
-def validate_spec(spec: dict) -> None:
-    """Raise `SpecError` if the spec is not well formed. Returns None on success."""
+def _in_bound(v: Any, int_bound: int) -> bool:
+    """True unless `v` is an integer of magnitude greater than the bound."""
+    if isinstance(v, bool) or not isinstance(v, int):
+        return True
+    return -int_bound <= v <= int_bound
+
+
+def validate_spec(spec: dict, int_bound: int = DEFAULT_INT_BOUND) -> None:
+    """Raise `SpecError` if the spec is not well formed. Returns None on success.
+
+    Rejects any integer in ``initial``, ``when`` or ``set`` that lies outside ``int_bound``: those
+    describe states the encoding cannot represent, so the model as written is not the model that
+    would be checked.
+
+    Conditions (invariants and the goal) are NOT rejected for the same reason — see `spec_warnings`.
+    A condition naming an out-of-range value is trivially satisfied rather than wrong, so it is
+    reported as uninformative instead of refused.
+    """
     _require(isinstance(spec, dict), "spec must be an object")
+    _require(isinstance(int_bound, int) and not isinstance(int_bound, bool), "'int_bound' must be an integer")
+    _require(int_bound > 0, "'int_bound' must be positive")
     fields = spec.get("fields")
     _require(isinstance(fields, list) and fields, "'fields' must be a non-empty list")
     _require(all(isinstance(f, str) for f in fields), "every field name must be a string")
@@ -61,6 +102,11 @@ def validate_spec(spec: dict) -> None:
     init = spec.get("initial")
     _require(isinstance(init, dict), "'initial' must be an object")
     _require(set(init) == set(fields), "'initial' must assign exactly the declared fields")
+    for f, v in init.items():
+        _require(
+            _in_bound(v, int_bound),
+            f"'initial' field {f!r} is {v}, outside int_bound {int_bound}; raise int_bound to cover it",
+        )
 
     trans = spec.get("transitions")
     _require(isinstance(trans, list) and trans, "'transitions' must be a non-empty list")
@@ -73,6 +119,11 @@ def validate_spec(spec: dict) -> None:
                 _require(isinstance(v, dict), f"transition {i}: '{key}' must be an object")
                 unknown = set(v) - set(fields)
                 _require(not unknown, f"transition {i}: '{key}' names unknown fields {sorted(unknown)}")
+        for f, val in (t.get("when") or {}).items():
+            _require(
+                _in_bound(val, int_bound),
+                f"transition {i}: 'when' field {f!r} is {val}, outside int_bound {int_bound}",
+            )
         _require(isinstance(t.get("set"), dict) and t["set"], f"transition {i}: 'set' is required")
         for f, val in t["set"].items():
             if isinstance(val, dict):
@@ -80,20 +131,27 @@ def validate_spec(spec: dict) -> None:
                     set(val) <= {"incr", "decr"} and len(val) == 1,
                     f"transition {i}: field {f!r} update must be a literal, {{'incr': n}} or {{'decr': n}}",
                 )
+                amount = list(val.values())[0]
                 _require(
-                    isinstance(list(val.values())[0], int),
+                    isinstance(amount, int) and not isinstance(amount, bool),
                     f"transition {i}: field {f!r} incr/decr amount must be an integer",
+                )
+            else:
+                _require(
+                    _in_bound(val, int_bound),
+                    f"transition {i}: 'set' field {f!r} is {val}, outside int_bound {int_bound}; "
+                    f"raise int_bound to cover it",
                 )
 
     invs = spec.get("invariants") or {}
     _require(isinstance(invs, dict), "'invariants' must be an object")
     for name, cond in invs.items():
-        _check_cond(cond, fields, f"invariant {name!r}")
+        _check_cond(cond, fields, f"invariant {name!r}", int_bound)
     if spec.get("goal") is not None:
-        _check_cond(spec["goal"], fields, "goal")
+        _check_cond(spec["goal"], fields, "goal", int_bound)
 
 
-def _check_cond(cond: Any, fields: list, where: str) -> None:
+def _check_cond(cond: Any, fields: list, where: str, int_bound: int = DEFAULT_INT_BOUND) -> None:
     _require(isinstance(cond, dict), f"{where}: must be an object")
     _require(
         set(cond) <= {"forbid", "require"} and len(cond) == 1,
@@ -103,6 +161,47 @@ def _check_cond(cond: Any, fields: list, where: str) -> None:
     _require(isinstance(body, dict) and body, f"{where}: condition body must be a non-empty object")
     unknown = set(body) - set(fields)
     _require(not unknown, f"{where}: names unknown fields {sorted(unknown)}")
+    # Deliberately does NOT reject an out-of-bound literal here. Now that integers are never
+    # clamped, the reachable space genuinely lies inside the bound, so "never reach 99" with a
+    # bound of 64 is a TRUE statement about that space, not a false one — just an uninformative
+    # one. `spec_warnings` reports it so the triviality is visible without rejecting a valid spec.
+    return
+
+
+def spec_warnings(spec: dict, int_bound: int = DEFAULT_INT_BOUND) -> list:
+    """Conditions that are technically true but carry no information. Never fatal.
+
+    The case that matters: an invariant or goal naming an integer the bounded state space cannot
+    represent. Because integers are no longer clamped, the reachable space really does lie inside
+    ``int_bound``, so such a condition genuinely holds — it just holds for a reason that has nothing
+    to do with the protocol being modelled. Reporting a bare ``holds: true`` there invites a reader
+    to conclude something was verified, so the triviality is surfaced instead of buried.
+    """
+    warnings: list = []
+    fields = spec.get("fields") if isinstance(spec, dict) else None
+    if not isinstance(fields, list):
+        return warnings
+
+    def scan(cond, where):
+        if not isinstance(cond, dict) or len(cond) != 1:
+            return
+        body = list(cond.values())[0]
+        if not isinstance(body, dict):
+            return
+        for f, v in body.items():
+            if not _in_bound(v, int_bound):
+                warnings.append(
+                    f"{where}: field {f!r} is compared against {v}, which is outside int_bound "
+                    f"{int_bound}. No reachable state can hold that value, so this condition is "
+                    f"trivially satisfied and verifies nothing. Raise int_bound to at least "
+                    f"{abs(v)} if you meant this to be checkable."
+                )
+
+    for name, cond in (spec.get("invariants") or {}).items():
+        scan(cond, f"invariant {name!r}")
+    if spec.get("goal") is not None:
+        scan(spec["goal"], "goal")
+    return warnings
 
 
 def _pred(cond: dict):
@@ -113,22 +212,33 @@ def _pred(cond: dict):
 
 
 def protocol_from_spec(spec: dict, int_bound: int = DEFAULT_INT_BOUND) -> Protocol:
-    """Build a `Protocol` from a declarative spec. Raises `SpecError` if malformed."""
-    validate_spec(spec)
+    """Build a `Protocol` from a declarative spec. Raises `SpecError` if malformed.
+
+    The returned transition function raises `IntBoundExceeded` if a run carries an integer field
+    past ``int_bound``. It does NOT clamp: a saturated counter would make unreachable states look
+    unreachable-by-proof, which is a false negative dressed as a verdict.
+    """
+    validate_spec(spec, int_bound=int_bound)
     fields: list = list(spec["fields"])
     idx = {f: i for i, f in enumerate(fields)}
     initial = tuple(spec["initial"][f] for f in fields)
     rules = spec["transitions"]
 
-    def clamp(v):
-        if isinstance(v, int) and not isinstance(v, bool):
-            return max(-int_bound, min(int_bound, v))
+    def checked(v, field: str, label: str):
+        """Return `v`, or refuse if it left the bound. Never silently truncates."""
+        if isinstance(v, int) and not isinstance(v, bool) and not (-int_bound <= v <= int_bound):
+            raise IntBoundExceeded(
+                f"transition {label!r} drives field {field!r} to {v}, outside int_bound {int_bound}. "
+                f"The state space is not finite under this bound, so no exhaustive verdict is "
+                f"available. Re-run with int_bound >= {abs(v)}."
+            )
         return v
 
     def transitions(s):
         d = dict(zip(fields, s))
         out = []
         for i, t in enumerate(rules):
+            label = t.get("label", f"t{i}")
             when = t.get("when") or {}
             if not all(d.get(f) == v for f, v in when.items()):
                 continue
@@ -139,12 +249,10 @@ def protocol_from_spec(spec: dict, int_bound: int = DEFAULT_INT_BOUND) -> Protoc
                     if not isinstance(cur, int) or isinstance(cur, bool):
                         continue  # incr/decr on a non-integer is a no-op
                     delta = val.get("incr", 0) - val.get("decr", 0)
-                    nxt[idx[f]] = clamp(cur + delta)
+                    nxt[idx[f]] = checked(cur + delta, f, label)
                 else:
-                    nxt[idx[f]] = clamp(val)
-            nxt = tuple(nxt)
-            if nxt != s or True:  # self-loops are legal and kept
-                out.append((t.get("label", f"t{i}"), nxt))
+                    nxt[idx[f]] = checked(val, f, label)
+            out.append((label, tuple(nxt)))  # self-loops are legal and kept
         return out
 
     invariants = {name: _pred(cond) for name, cond in (spec.get("invariants") or {}).items()}

@@ -17,10 +17,20 @@ False
 The breadth-first engine is standard library only. SMT-backed induction (`prove_inductive`,
 `prove_k_induction`) imports z3 lazily; call `z3_available()` to check, and install the `smt` extra to
 enable it.
+
+**When in doubt, minicheck refuses.** Every entry point is built so that "I could not determine this"
+is a distinct outcome from "this holds", and it is never quietly upgraded:
+
+* a search that exceeds `max_states` raises `RuntimeError` rather than reporting a partial sweep;
+* a spec whose integers leave `int_bound` raises `IntBoundExceeded` rather than saturating them;
+* a vacuous SMT encoding returns ``proven=False, vacuous=True`` with the reason named;
+* a singular probability system raises `SingularSystem` rather than returning a sentinel;
+* an unasked question (no goal) returns ``holds=None``, not ``True``.
 """
 
 from ._core import (
     Protocol,
+    SingularSystem,
     check_bounded_time,
     check_composition,
     check_liveness,
@@ -35,7 +45,14 @@ from ._core import (
     prove_latency_bound,
     z3_available,
 )
-from .spec import SpecError, protocol_from_spec, validate_spec
+from .spec import (
+    DEFAULT_INT_BOUND,
+    IntBoundExceeded,
+    SpecError,
+    protocol_from_spec,
+    spec_warnings,
+    validate_spec,
+)
 
 __all__ = [
     "Protocol",
@@ -54,7 +71,11 @@ __all__ = [
     "z3_available",
     "protocol_from_spec",
     "validate_spec",
+    "spec_warnings",
     "SpecError",
+    "IntBoundExceeded",
+    "SingularSystem",
+    "DEFAULT_INT_BOUND",
     "__version__",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

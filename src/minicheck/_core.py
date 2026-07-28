@@ -16,6 +16,21 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 
+class SearchIncomplete(Exception):
+    """The state-space sweep could not be completed, so no exhaustive verdict is available.
+
+    Signals "I stopped looking", never "there is nothing there". `check_safety` catches this to
+    downgrade an unrefuted invariant from ``holds=True`` to ``holds=None``; a counterexample already
+    found stays valid, because a witness does not depend on the search finishing.
+
+    Subclassed by `StateSpaceExceeded` here and by `spec.IntBoundExceeded`.
+    """
+
+
+class StateSpaceExceeded(SearchIncomplete, RuntimeError):
+    """The reachable set grew past `max_states`. Also a RuntimeError, for callers that catch that."""
+
+
 @dataclass
 class Protocol:
     name: str
@@ -45,7 +60,7 @@ def _reachable(model: Protocol, max_states=200000):
                 order.append(ns)
                 q.append(ns)
                 if len(seen) > max_states:
-                    raise RuntimeError(f"state space > {max_states}")
+                    raise StateSpaceExceeded(f"state space > {max_states}")
     return seen, order
 
 
@@ -61,27 +76,111 @@ def _trace(parent, target):
     return path
 
 
-def check_safety(model: Protocol) -> dict:
-    """For each invariant, exhaustively look for a reachable violating state; return shortest CEX."""
-    parent, order = _reachable(model)
-    out = {"reachable_states": len(parent), "properties": {}}
-    for name, pred in model.invariants.items():
-        cex = None
-        for s in order:
-            if not pred(model.d(s)):
-                tr = _trace(parent, s)
-                cex = [{"label": lb, "state": model.d(st)} for lb, st in tr]
-                break
-        out["properties"][name] = {"holds": cex is None, "counterexample": cex}
+def check_safety(model: Protocol, max_states: int = 200000) -> dict:
+    """For each invariant, exhaustively look for a reachable violating state; return shortest CEX.
+
+    Three-valued, and the asymmetry is deliberate. Refuting a safety property and proving one need
+    different amounts of evidence:
+
+    * ``holds=False`` — a violating state was reached. The counterexample trace is a witness, so this
+      is sound even if the sweep never finished. A bug found in a partial search is still a bug.
+    * ``holds=True`` — the sweep completed and no state violated the invariant. This one *requires*
+      exhaustiveness, which is why it is only issued when the whole space was enumerated.
+    * ``holds=None`` — the search hit `max_states`, or the model refused to expand (an unbounded
+      integer field), before any violation appeared. Undetermined: absence of a counterexample in a
+      truncated search is not evidence of absence. ``incomplete_reason`` says what stopped it.
+
+    So a model too big to enumerate still yields real counterexamples, and never yields a false
+    "proved safe".
+    """
+    invariants = list(model.invariants.items())
+    parent = {model.initial: (None, None)}
+    order = [model.initial]
+    cex: dict = {}
+    incomplete = None
+
+    def _scan(state):
+        """Record the first violation of each invariant; BFS order makes it a shortest one."""
+        d = model.d(state)
+        for name, pred in invariants:
+            if name in cex:
+                continue
+            try:
+                ok = pred(d)
+            except Exception as e:
+                raise ValueError(f"invariant {name!r} raised on state {d!r}: {e}") from e
+            if not ok:
+                cex[name] = [{"label": lb, "state": model.d(st)} for lb, st in _trace(parent, state)]
+
+    try:
+        _scan(model.initial)
+        q = deque([model.initial])
+        while q:
+            s = q.popleft()
+            for label, ns in model.transitions(s):
+                if ns not in parent:
+                    if len(parent) >= max_states:
+                        raise StateSpaceExceeded(f"state space > {max_states}")
+                    parent[ns] = (s, label)
+                    order.append(ns)
+                    _scan(ns)
+                    q.append(ns)
+    except SearchIncomplete as e:
+        # The sweep stopped early. Anything already witnessed stands; anything unrefuted becomes
+        # undetermined rather than proved.
+        incomplete = f"{type(e).__name__}: {e}"
+
+    out = {
+        "reachable_states": len(parent),
+        "exhaustive": incomplete is None,
+        "properties": {},
+    }
+    if incomplete:
+        out["incomplete_reason"] = incomplete
+    for name, _ in invariants:
+        if name in cex:
+            # A witness is a witness whether or not the sweep finished.
+            out["properties"][name] = {"holds": False, "counterexample": cex[name]}
+        elif incomplete is None:
+            out["properties"][name] = {"holds": True, "counterexample": None}
+        else:
+            out["properties"][name] = {
+                "holds": None,
+                "counterexample": None,
+                "reason": f"search did not complete ({incomplete}); no violation was found in the "
+                f"{len(parent)} states explored, but that is not a proof of absence",
+            }
     return out
 
 
 def check_liveness(model: Protocol) -> dict:
     """Sound AG-EF check: every reachable state must be able to reach a goal state (co-reachability).
-    A reachable state that cannot reach the goal is a liveness 'trap' -> violation with a witness."""
+    A reachable state that cannot reach the goal is a liveness 'trap' -> violation with a witness.
+
+    Three-valued, for the same reason `check_safety` is. AG-EF is a claim about EVERY reachable
+    state, so it cannot be established from a search that stopped early — a trap might sit in the
+    part that was never explored. An incomplete sweep therefore returns ``holds=None``.
+
+    A model with no goal also returns ``holds=None``. "You never told me what to reach" is an
+    absent question, not a satisfied property.
+    """
     if model.goal is None:
-        return {"holds": True, "note": "no goal defined"}
-    parent, order = _reachable(model)
+        return {
+            "holds": None,
+            "note": "no goal defined, so liveness is undetermined (not vacuously satisfied); "
+            "set Protocol.goal to ask a liveness question",
+        }
+    try:
+        parent, order = _reachable(model)
+    except SearchIncomplete as e:
+        # Unlike safety, there is no partial result worth keeping: a trap witness found in a
+        # truncated sweep is still real, but establishing that NO trap exists needs the whole space,
+        # and the traps we could name are exactly the ones we already explored.
+        return {
+            "holds": None,
+            "note": "the reachable-state sweep did not finish, so AG-EF could not be decided",
+            "incomplete_reason": f"{type(e).__name__}: {e}",
+        }
     # build forward edges and reverse edges
     fwd = {s: [] for s in parent}
     for s in parent:
@@ -114,10 +213,22 @@ def check_liveness(model: Protocol) -> dict:
     }
 
 
-def check_bounded_time(model: Protocol, bound: int) -> dict:
-    """A goal state must be reachable from init within `bound` steps (BFS depth)."""
+def check_bounded_time(model: Protocol, bound: int, max_states: int = 200000) -> dict:
+    """A goal state must be reachable from init within `bound` steps (BFS depth).
+
+    Carries the same `max_states` guard as `_reachable`: an unbounded model would otherwise consume
+    memory until the process dies, and a partial sweep that ran out of room must not report a verdict.
+
+    A model with no goal returns ``holds=None`` — undetermined, not True. There is no evidence either
+    way about a deadline for an event the model never names.
+    """
     if model.goal is None:
-        return {"holds": True, "note": "no goal defined"}
+        return {
+            "holds": None,
+            "steps_to_goal": None,
+            "bound": bound,
+            "note": "no goal defined, so bounded-time is undetermined (not vacuously satisfied)",
+        }
     depth = {model.initial: 0}
     q = deque([model.initial])
     best = None
@@ -130,6 +241,12 @@ def check_bounded_time(model: Protocol, bound: int) -> dict:
             if ns not in depth:
                 depth[ns] = depth[s] + 1
                 q.append(ns)
+                if len(depth) > max_states:
+                    raise StateSpaceExceeded(
+                        f"state space > {max_states} while searching for the goal; the sweep was not "
+                        f"exhaustive, so no bounded-time verdict is available. Raise max_states or "
+                        f"shrink the model."
+                    )
     return {"holds": best is not None and best <= bound, "steps_to_goal": best, "bound": bound}
 
 
@@ -143,34 +260,126 @@ def z3_available() -> bool:
         return False
 
 
+def _var_names(v) -> set:
+    """Names of the z3 declarations in a var container (dict, list or tuple)."""
+    vals = v.values() if isinstance(v, dict) else (v if isinstance(v, (list, tuple)) else [v])
+    return {str(x) for x in vals}
+
+
+def _vacuity_check(v, vn, init, trans, inv, timeout_ms):
+    """Return (ok, reason). Detects the encodings under which every proof obligation is vacuous.
+
+    An UNSAT antecedent makes ``Inv & T => Inv'`` valid for reasons that have nothing to do with the
+    invariant. The classic way to hit this by accident is to return the *same* variables for the
+    current and next state, so ``x' == x + 1`` is unsatisfiable and every step obligation discharges.
+    A proof that holds because its premise is impossible is not a proof of anything.
+    """
+    import z3
+
+    shared = _var_names(v) & _var_names(vn)
+    if shared:
+        return False, (
+            f"current- and next-state variables overlap on {sorted(shared)}; decls() must return two "
+            f"DISJOINT copies of the state, otherwise the transition relation is unsatisfiable and "
+            f"every obligation is vacuously valid"
+        )
+
+    def _sat(expr, what):
+        s = z3.Solver()
+        if timeout_ms is not None:
+            s.set("timeout", timeout_ms)
+        s.add(expr)
+        r = s.check()
+        if r == z3.unsat:
+            return False, f"{what} is unsatisfiable, so every proof obligation built on it is vacuous"
+        if r == z3.unknown:
+            return False, f"z3 returned unknown while checking that {what} is satisfiable"
+        return True, ""
+
+    obligations = (
+        (trans(v, vn), "the transition relation"),
+        (inv(v), "the invariant"),
+        (init(v), "the initial-state predicate"),
+    )
+    for expr, what in obligations:
+        ok, why = _sat(expr, what)
+        if not ok:
+            return False, why
+    return True, ""
+
+
 def prove_inductive(decls, init, trans, inv, timeout_ms: int | None = None):
     """Prove an inductive invariant with z3.
+
     decls() -> (vars, vars_next); init(vars) -> z3 Bool; trans(vars,vars_next) -> z3 Bool;
-    inv(vars) -> z3 Bool. Returns {'available','base_case','inductive_step','proven'}.
+    inv(vars) -> z3 Bool.
+
+    Returns ``{'available', 'base_case', 'inductive_step', 'proven', 'vacuous', 'reason'}``.
+    ``proven`` is True only when both obligations discharge AND the encoding is non-vacuous.
+
+    Two ways this refuses instead of answering:
+
+    * **Vacuity.** Before proving anything, the encoding is checked for the failure modes that make
+      the obligations trivially valid — overlapping current/next variables, an unsatisfiable
+      transition relation, an unsatisfiable invariant or initial predicate. Any of these returns
+      ``proven=False, vacuous=True`` with the reason named. Previously such an encoding returned
+      ``proven=True``, which is a proof of nothing reported as a proof.
+    * **Unknown.** A z3 ``unknown`` (including a timeout) is not ``unsat``, so it never counts as a
+      discharged obligation. ``proven`` is False and ``reason`` says which obligation was undecided.
 
     timeout_ms: fail-closed live-request cap. Default None = unbounded (offline proof gates keep
-    their full budgets). When set, a z3 `unknown`/timeout makes base_ok/step_ok False -> proven
-    False (never silently "proven"). Only the API seam passes a value; all offline callers omit it.
+    their full budgets). Only the API seam passes a value; all offline callers omit it.
     """
     if not z3_available():
-        return {"available": False, "proven": None}
+        return {
+            "available": False,
+            "proven": None,
+            "reason": "z3 is not installed; no inductive proof was attempted (pip install z3-solver)",
+        }
     import z3
 
     v, vn = decls()
-    s1 = z3.Solver()
-    if timeout_ms is not None:
-        s1.set("timeout", timeout_ms)
-    s1.add(init(v))
-    s1.add(z3.Not(inv(v)))
-    base_ok = s1.check() == z3.unsat  # Init => Inv
-    s2 = z3.Solver()
-    if timeout_ms is not None:
-        s2.set("timeout", timeout_ms)
-    s2.add(inv(v))
-    s2.add(trans(v, vn))
-    s2.add(z3.Not(inv(vn)))
-    step_ok = s2.check() == z3.unsat  # Inv & T => Inv'
-    return {"available": True, "base_case": base_ok, "inductive_step": step_ok, "proven": bool(base_ok and step_ok)}
+
+    non_vacuous, why = _vacuity_check(v, vn, init, trans, inv, timeout_ms)
+    if not non_vacuous:
+        return {
+            "available": True,
+            "base_case": None,
+            "inductive_step": None,
+            "proven": False,
+            "vacuous": True,
+            "reason": why,
+        }
+
+    def _discharge(assertions):
+        """An obligation discharges only on UNSAT. `unknown` is undecided, never success."""
+        s = z3.Solver()
+        if timeout_ms is not None:
+            s.set("timeout", timeout_ms)
+        for a in assertions:
+            s.add(a)
+        r = s.check()
+        return r == z3.unsat, r
+
+    base_ok, base_r = _discharge([init(v), z3.Not(inv(v))])  # Init => Inv
+    step_ok, step_r = _discharge([inv(v), trans(v, vn), z3.Not(inv(vn))])  # Inv & T => Inv'
+
+    undecided = [n for n, r in (("base_case", base_r), ("inductive_step", step_r)) if r == z3.unknown]
+    reason = ""
+    if undecided:
+        reason = f"z3 returned unknown for {', '.join(undecided)}; undecided is not proven"
+    elif not (base_ok and step_ok):
+        failed = [n for n, ok in (("base_case", base_ok), ("inductive_step", step_ok)) if not ok]
+        reason = f"{', '.join(failed)} did not discharge (a counterexample to induction exists)"
+
+    return {
+        "available": True,
+        "base_case": base_ok,
+        "inductive_step": step_ok,
+        "proven": bool(base_ok and step_ok),
+        "vacuous": False,
+        "reason": reason,
+    }
 
 
 def prove_k_induction(mk, init, trans, inv, k=2, timeout_ms: int | None = None):
@@ -331,8 +540,34 @@ def check_probabilistic(trans_probs, start, miss_states, eps, success_states=Non
             elif ns in idx:
                 A[i][idx[ns]] -= p  # -p * h(ns)
             # ns absorbing-success or unlisted sink -> p*0, nothing to add
-    h = _solve_linear(A, b)
+    if start not in idx:
+        raise ValueError(f"start state {start!r} is not one of the {n} states in trans_probs")
+    try:
+        h = _solve_linear(A, b)
+    except SingularSystem as e:
+        # No unique solution => no hitting probability. Abstain loudly rather than report a number.
+        return {
+            "engine": "absorbing-markov-chain (exact linear solve)",
+            "p_miss": None,
+            "eps": float(eps),
+            "holds": None,
+            "n_states": n,
+            "reason": f"the chain's linear system has no unique solution ({e}); no exact hitting "
+            f"probability exists, so no verdict is issued",
+        }
     p_miss = float(h[idx[start]])
+    if not (0.0 - 1e-9 <= p_miss <= 1.0 + 1e-9):
+        # A probability outside [0,1] means the input was not a stochastic matrix. Do not report it.
+        return {
+            "engine": "absorbing-markov-chain (exact linear solve)",
+            "p_miss": None,
+            "eps": float(eps),
+            "holds": None,
+            "n_states": n,
+            "reason": f"solved hitting probability {p_miss!r} is outside [0, 1]; trans_probs is not a "
+            f"valid stochastic matrix (do the rows sum to 1?), so the result is not a probability",
+        }
+    p_miss = min(1.0, max(0.0, p_miss))
     return {
         "engine": "absorbing-markov-chain (exact linear solve)",
         "p_miss": p_miss,
@@ -379,6 +614,12 @@ def check_statistical(trans_probs, start, miss_states, n_samples=20000, seed=123
         "confidence": conf,
         "half_width": half,
         "p_miss_upper": min(1.0, p + half),
+        # No `holds` key by design. This is an estimate with a confidence interval, not a proof, and
+        # emitting a boolean next to it would invite exactly the confusion the interval exists to
+        # prevent. Compare `p_miss_upper` against your target yourself, and note that the guarantee
+        # is (1 - conf) two-sided over the sampling, not over the model.
+        "is_proof": False,
+        "note": "statistical estimate, NOT an exhaustive proof; use check_probabilistic for an exact verdict",
     }
 
 
@@ -458,25 +699,68 @@ def empirical_bernstein_anytime(var_hat, n, delta=0.05, rng=1.0):
     }
 
 
-def _solve_linear(A, b):
-    """Gaussian elimination with partial pivoting (numpy if available, else pure Python)."""
+class SingularSystem(ArithmeticError):
+    """The linear system has no unique solution, so no hitting probability can be reported.
+
+    Raised instead of returning a number. The previous implementation swallowed numpy's
+    ``LinAlgError`` and divided by a ``1e-15`` sentinel, so a singular system produced a finite,
+    plausible-looking answer on the order of 1e15 with no error and no flag.
+    """
+
+
+def _solve_linear(A, b, tol: float = 1e-12):
+    """Solve A x = b exactly-or-refuse. Never returns a value for a system that has none.
+
+    Uses numpy when available and falls back to Gaussian elimination with partial pivoting. A
+    singular or numerically-degenerate matrix raises `SingularSystem` rather than dividing by a
+    sentinel: a chain whose linear system does not have a unique solution has no well-defined
+    hitting probability, and inventing one is worse than saying so.
+    """
+    n = len(b)
+    if n == 0:
+        raise SingularSystem("empty linear system: nothing to solve")
+    if any(len(row) != n for row in A) or len(A) != n:
+        raise SingularSystem(f"linear system is not square: A is {len(A)}x{len(A[0]) if A else 0}, b has {n} entries")
+
     try:
         import numpy as np
+    except ImportError:
+        np = None
 
-        return [float(x) for x in np.linalg.solve(np.array(A, dtype=float), np.array(b, dtype=float))]
-    except Exception:
-        pass
-    n = len(b)
-    M = [row[:] + [b[i]] for i, row in enumerate(A)]
+    if np is not None:
+        try:
+            arr = np.array(A, dtype=float)
+            sol = np.linalg.solve(arr, np.array(b, dtype=float))
+        except np.linalg.LinAlgError as e:
+            raise SingularSystem(f"matrix is singular: {e}") from e
+        if not np.all(np.isfinite(sol)):
+            raise SingularSystem("solution contains non-finite entries; the system is degenerate")
+        # A solved-but-ill-conditioned system is reported too: the digits are not there.
+        cond = float(np.linalg.cond(arr))
+        if not (cond < 1.0 / tol):
+            raise SingularSystem(
+                f"matrix is numerically singular (condition number {cond:.3g}); the solution would "
+                f"carry no significant digits"
+            )
+        return [float(x) for x in sol]
+
+    M = [list(row) + [b[i]] for i, row in enumerate(A)]
     for col in range(n):
         piv = max(range(col, n), key=lambda r: abs(M[r][col]))
+        if abs(M[piv][col]) <= tol:
+            raise SingularSystem(f"matrix is singular: no usable pivot in column {col}")
         M[col], M[piv] = M[piv], M[col]
-        pv = M[col][col] or 1e-15
+        pv = M[col][col]
         for r in range(n):
             if r != col and M[r][col]:
                 f = M[r][col] / pv
                 M[r] = [M[r][k] - f * M[col][k] for k in range(n + 1)]
-    return [M[i][n] / (M[i][i] or 1e-15) for i in range(n)]
+    out = []
+    for i in range(n):
+        if abs(M[i][i]) <= tol:
+            raise SingularSystem(f"matrix is singular: zero pivot at row {i} after elimination")
+        out.append(M[i][n] / M[i][i])
+    return out
 
 
 # --------------- refinement & composition ---------------
@@ -518,11 +802,34 @@ def check_refinement(impl: Protocol, spec: Protocol, abstraction) -> dict:
 def check_composition(models, joint_invariants) -> dict:
     """Prove safety is preserved when several procedures run concurrently (interleaving product).
 
-    models: list[Protocol] (their `fields` must be disjoint). The product interleaves each component's
-    transitions over the combined state. `joint_invariants` (name->predicate(combined-dict)->bool)
-    are checked over the whole reachable product — catching any EMERGENT cross-procedure counterexample
-    that none of the components exhibits alone.
+    models: list[Protocol] whose `fields` MUST be disjoint — this is checked, not assumed. The
+    product interleaves each component's transitions over the combined state. `joint_invariants`
+    (name->predicate(combined-dict)->bool) are checked over the whole reachable product — catching any
+    EMERGENT cross-procedure counterexample that none of the components exhibits alone.
+
+    Raises `ValueError` if two components share a field name. The combined state dict is keyed by
+    field name, so a shared name silently collapses two independent variables into one: the product
+    explored is not the product the caller described, and any verdict is about a different system.
     """
+    if not models:
+        raise ValueError("check_composition needs at least one model; an empty product has no meaning")
+
+    seen_fields: dict = {}
+    collisions: dict = {}
+    for m in models:
+        for f in m.fields:
+            if f in seen_fields:
+                collisions.setdefault(f, [seen_fields[f]]).append(m.name)
+            else:
+                seen_fields[f] = m.name
+    if collisions:
+        detail = "; ".join(f"{f!r} in {sorted(set(owners))}" for f, owners in sorted(collisions.items()))
+        raise ValueError(
+            f"composed models must have disjoint field names, but {detail}. The product state is keyed "
+            f"by name, so shared names merge into one variable and the result would describe a different "
+            f"system than the one you passed. Rename the fields (e.g. prefix each with its model name)."
+        )
+
     fields = tuple(f for m in models for f in m.fields)
     sizes = [len(m.fields) for m in models]
     offs = [sum(sizes[:i]) for i in range(len(models))]
@@ -575,12 +882,30 @@ def prove_composition_inductive(components, timeout_ms: int | None = None):
     decomposition is sound BY CONSTRUCTION (disjoint namespaces, verified below).
 
     Returns base/step/proven + the assume-guarantee soundness flag.
+
+    ``proven`` is GATED on that flag. The non-interference argument above is what makes the
+    decomposition sound, and it only holds when the namespaces really are disjoint — so if the check
+    fails, the obligations may well discharge but they do not mean what the docstring says they mean.
+    Previously the flag was computed and reported but never consulted, so a caller who trusted
+    ``proven`` got a verdict whose stated justification did not apply.
     """
     if not z3_available():
-        return {"available": False, "proven": None}
+        return {
+            "available": False,
+            "proven": None,
+            "reason": "z3 is not installed; no compositional proof was attempted (pip install z3-solver)",
+        }
     import z3
 
     n = len(components)
+    if n == 0:
+        return {
+            "available": True,
+            "n_components": 0,
+            "proven": False,
+            "assume_guarantee_sound": False,
+            "reason": "no components supplied; an empty product proves nothing",
+        }
     cur = [components[i]["mk"](f"_c{i}") for i in range(n)]
     nxt = [components[i]["mk"](f"_c{i}_n") for i in range(n)]
 
@@ -588,7 +913,14 @@ def prove_composition_inductive(components, timeout_ms: int | None = None):
     # component's step can touch another's state (non-interference) -> the rely-guarantee decomposition
     # is sound and the joint invariant decomposes over the product.
     names = [{str(var) for var in c.values()} for c in cur]
-    disjoint = all(names[i].isdisjoint(names[j]) for i in range(n) for j in range(i + 1, n))
+    nxt_names = [{str(var) for var in c.values()} for c in nxt]
+    overlaps = sorted(
+        {v for i in range(n) for j in range(i + 1, n) for v in (names[i] & names[j])}
+        # a component whose next-state vars collide with its own current-state vars makes the
+        # stutter constraint self-contradictory, which is the compositional form of the C2 vacuity bug
+        | {v for i in range(n) for v in (names[i] & nxt_names[i])}
+    )
+    disjoint = not overlaps
 
     joint_init = z3.And(*[components[i]["init"](cur[i]) for i in range(n)])
     joint_inv_cur = z3.And(*[components[i]["inv"](cur[i]) for i in range(n)])
@@ -616,13 +948,28 @@ def prove_composition_inductive(components, timeout_ms: int | None = None):
     ss.add(product_trans)
     ss.add(z3.Not(joint_inv_nxt))
     step_ok = ss.check() == z3.unsat  # I & T_product => I'
+
+    reason = ""
+    if not disjoint:
+        reason = (
+            f"assume-guarantee soundness FAILED: variable namespaces overlap on {overlaps}. The "
+            f"non-interference argument that justifies this decomposition does not apply, so the "
+            f"obligations below carry no compositional meaning and `proven` is withheld."
+        )
+    elif not (base_ok and step_ok):
+        failed = [n_ for n_, ok in (("base_case", base_ok), ("inductive_step", step_ok)) if not ok]
+        reason = f"{', '.join(failed)} did not discharge"
+
     return {
         "available": True,
         "n_components": n,
         "base_case": base_ok,
         "inductive_step": step_ok,
-        "proven": bool(base_ok and step_ok),
+        # gated on soundness: the obligations only mean what we claim when the namespaces are disjoint
+        "proven": bool(base_ok and step_ok and disjoint),
         "assume_guarantee_sound": bool(disjoint),
+        "namespace_overlaps": overlaps,
+        "reason": reason,
         "method": (
             "z3 inductive invariant over the UNBOUNDED interleaving product (no state cap); "
             "assume-guarantee non-interference by disjoint variable namespaces"

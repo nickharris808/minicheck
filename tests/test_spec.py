@@ -6,7 +6,7 @@ tests care as much about what it REFUSES as about what it builds.
 
 import pytest
 
-from minicheck import SpecError, check_liveness, check_safety, protocol_from_spec, validate_spec
+from minicheck import SpecError, check_liveness, check_safety, protocol_from_spec, spec_warnings, validate_spec
 
 MUTEX = {
     "name": "mutex",
@@ -73,16 +73,69 @@ def test_incr_and_decr_move_integers():
     assert check_safety(protocol_from_spec(spec))["properties"]["never_two"]["holds"] is True
 
 
-def test_integers_are_clamped_so_the_space_stays_finite():
-    """An unbounded counter must not produce an unbounded search."""
+def test_leaving_int_bound_refuses_instead_of_clamping():
+    """An unbounded counter must not produce an unbounded search — or a false verdict.
+
+    This replaces a test that asserted the counter was CLAMPED at the bound. Clamping kept the
+    search finite but made it lie: the invariant below is never violated within 0..8, so the old
+    code reported ``holds=True`` for a machine whose value grows without limit. The search now
+    stops and says it did not finish, and the verdict degrades to undetermined.
+    """
     spec = {
         "fields": ["n"],
         "initial": {"n": 0},
         "transitions": [{"label": "up", "set": {"n": {"incr": 1}}}],
-        "invariants": {"t": {"forbid": {"n": -999}}},
+        # In range, so the invariant itself is answerable; the counter just never goes negative.
+        "invariants": {"t": {"forbid": {"n": -5}}},
     }
     res = check_safety(protocol_from_spec(spec, int_bound=8))
-    assert res["reachable_states"] == 9  # 0..8 inclusive, then clamped
+    assert res["reachable_states"] == 9  # 0..8 inclusive were genuinely explored
+    assert res["exhaustive"] is False
+    assert res["properties"]["t"]["holds"] is None  # NOT True — the sweep never finished
+    assert "int_bound" in res["incomplete_reason"]
+
+
+def test_the_clamp_false_proof_cannot_come_back():
+    """Regression for the worst defect shipped: a clamp that turned truncation into a proof.
+
+    The counter genuinely reaches 100. Under the old clamp it saturated at ``int_bound`` 64, the
+    forbidden state was never generated, and ``never_100`` was reported as HOLDING. No verdict of
+    ``True`` is acceptable here at any bound.
+    """
+    spec = {
+        "fields": ["c"],
+        "initial": {"c": 0},
+        "transitions": [{"label": "inc", "set": {"c": {"incr": 1}}}],
+        "invariants": {"never_100": {"forbid": {"c": 100}}},
+    }
+    # At the default bound the counter escapes before ever reaching 100, so the sweep cannot
+    # finish and the verdict must NOT be True. It was True under the clamp.
+    res_default = check_safety(protocol_from_spec(spec))
+    assert res_default["properties"]["never_100"]["holds"] is not True
+    assert res_default["exhaustive"] is False
+    # ...and the triviality of the out-of-range literal is reported rather than hidden.
+    assert any("int_bound" in w for w in spec_warnings(spec))
+
+    # With headroom the violation is genuinely found, and the trace replays to c == 100.
+    res = check_safety(protocol_from_spec(spec, int_bound=200))
+    prop = res["properties"]["never_100"]
+    assert prop["holds"] is False
+    assert prop["counterexample"][-1]["state"] == {"c": 100}
+    assert len(prop["counterexample"]) == 101  # initial + 100 increments
+
+
+def test_a_counterexample_survives_an_incomplete_sweep():
+    """holds=False is sound without exhaustiveness; holds=True is not. Both directions checked."""
+    spec = {
+        "fields": ["c"],
+        "initial": {"c": 0},
+        "transitions": [{"label": "inc", "set": {"c": {"incr": 1}}}],
+        "invariants": {"never_10": {"forbid": {"c": 10}}},
+    }
+    res = check_safety(protocol_from_spec(spec, int_bound=40))
+    assert res["exhaustive"] is False  # the counter runs past 40
+    assert res["properties"]["never_10"]["holds"] is False  # ...but the witness is still real
+    assert res["properties"]["never_10"]["counterexample"][-1]["state"] == {"c": 10}
 
 
 def test_require_and_forbid_are_duals():
