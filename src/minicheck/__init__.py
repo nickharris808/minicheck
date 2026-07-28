@@ -45,6 +45,8 @@ from ._core import (
     prove_latency_bound,
     z3_available,
 )
+from .render import RenderTooLarge, to_dot, to_mermaid, to_svg
+from .report import to_junit, to_sarif
 from .spec import (
     DEFAULT_INT_BOUND,
     IntBoundExceeded,
@@ -53,6 +55,7 @@ from .spec import (
     spec_warnings,
     validate_spec,
 )
+from .verdict import Verdict, combine, exit_code, from_holds, is_pass, to_holds
 
 __all__ = [
     "Protocol",
@@ -76,6 +79,20 @@ __all__ = [
     "IntBoundExceeded",
     "SingularSystem",
     "DEFAULT_INT_BOUND",
+    # the shared three-valued verdict contract
+    "Verdict",
+    "from_holds",
+    "to_holds",
+    "combine",
+    "exit_code",
+    "is_pass",
+    # emitters
+    "to_mermaid",
+    "to_dot",
+    "to_svg",
+    "to_sarif",
+    "to_junit",
+    "RenderTooLarge",
     "__version__",
 ]
-__version__ = "0.2.0"
+__version__ = "0.3.0"

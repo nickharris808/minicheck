@@ -448,3 +448,128 @@ def test_all_small_machines_agree_with_brute_force():
         )
         truth = (2,) not in naive_reachable(m)
         assert check_safety(m)["properties"]["not_2"]["holds"] is truth
+
+
+# ------------------------------------------------- P1: the compiled transition path must be exact
+def test_compiled_transitions_match_the_interpreted_semantics():
+    """The optimisation must be a pure speedup, never a semantic change.
+
+    `_compile_rules` hoists guard lookups and literal bound checks out of the hot loop. This
+    re-implements the ORIGINAL interpreted semantics inline and requires the two to agree on every
+    successor of every reachable state, for a range of spec shapes.
+    """
+    from minicheck.spec import protocol_from_spec
+
+    def interpreted(spec, s, fields, idx, int_bound):
+        """The pre-optimisation transition function, kept here as the oracle.
+
+        Includes the bound check, because the compiled path keeps it and comparing a bounded
+        implementation against an unbounded one compares two different functions.
+        """
+        d = dict(zip(fields, s))
+        out = []
+        for i, t in enumerate(spec["transitions"]):
+            label = t.get("label", f"t{i}")
+            if not all(d.get(f) == v for f, v in (t.get("when") or {}).items()):
+                continue
+            nxt = list(s)
+            for f, val in t["set"].items():
+                if isinstance(val, dict):
+                    cur = d.get(f)
+                    if not isinstance(cur, int) or isinstance(cur, bool):
+                        continue
+                    v = cur + val.get("incr", 0) - val.get("decr", 0)
+                    if not (-int_bound <= v <= int_bound):
+                        raise IntBoundExceeded(f"{label} drives {f} to {v}")
+                    nxt[idx[f]] = v
+                else:
+                    nxt[idx[f]] = val
+            out.append((label, tuple(nxt)))
+        return out
+
+    rng = random.Random(90210)
+    compared = 0
+    for _ in range(200):
+        n = rng.randint(1, 4)
+        fields = [f"f{i}" for i in range(n)]
+        rules = []
+        for j in range(rng.randint(1, 5)):
+            rule = {"label": f"r{j}", "set": {}}
+            if rng.random() < 0.6:
+                rule["when"] = {rng.choice(fields): rng.randrange(3)}
+            for f in rng.sample(fields, rng.randint(1, n)):
+                rule["set"][f] = {"incr": 1} if rng.random() < 0.3 else rng.randrange(3)
+            rules.append(rule)
+        spec = {
+            "fields": fields,
+            "initial": dict.fromkeys(fields, 0),
+            "transitions": rules,
+            "invariants": {"t": {"forbid": {fields[0]: 99}}},
+        }
+        idx = {f: i for i, f in enumerate(fields)}
+        model = protocol_from_spec(spec, int_bound=200)
+        # walk the reachable space, comparing successors at every state
+        seen, todo = {model.initial}, [model.initial]
+        while todo:
+            s = todo.pop()
+            # Both must agree on the successors AND on when to refuse.
+            try:
+                got = model.transitions(s)
+                raised = None
+            except IntBoundExceeded as e:
+                got, raised = None, e
+            try:
+                want = interpreted(spec, s, fields, idx, 200)
+                want_raised = None
+            except IntBoundExceeded as e:
+                want, want_raised = None, e
+            assert (raised is None) == (want_raised is None), (
+                f"one refused and the other did not at {s}: compiled={raised} interpreted={want_raised}"
+            )
+            if raised is not None:
+                continue
+            assert got == want, f"compiled != interpreted at {s}: {got} vs {want}"
+            compared += 1
+            for _, ns in got:
+                if ns not in seen and len(seen) < 400:
+                    seen.add(ns)
+                    todo.append(ns)
+    assert compared > 500
+
+
+def test_compiled_path_still_refuses_an_out_of_bound_increment():
+    """The one runtime check the optimisation keeps must still fire."""
+    spec = {
+        "fields": ["c"],
+        "initial": {"c": 0},
+        "transitions": [{"label": "up", "set": {"c": {"incr": 7}}}],
+        "invariants": {"i": {"forbid": {"c": 3}}},
+    }
+    p = protocol_from_spec(spec, int_bound=20)
+    with pytest.raises(IntBoundExceeded, match="int_bound"):
+        for s in [(0,), (7,), (14,), (21,)]:
+            p.transitions(s)
+
+
+def test_compiled_path_preserves_the_no_op_on_non_integer_increments():
+    """incr on a string field was a documented no-op; the rewrite must not change that."""
+    spec = {
+        "fields": ["s", "n"],
+        "initial": {"s": "idle", "n": 0},
+        "transitions": [{"label": "t", "when": {"s": "idle"}, "set": {"s": {"incr": 1}, "n": 1}}],
+        "invariants": {"i": {"forbid": {"n": 99}}},
+    }
+    p = protocol_from_spec(spec)
+    assert p.transitions(("idle", 0)) == [("t", ("idle", 1))]
+
+
+def test_booleans_are_not_treated_as_integers_by_the_compiled_path():
+    """`True` is an int in Python; incr on it would be a silent semantic change."""
+    spec = {
+        "fields": ["b"],
+        "initial": {"b": True},
+        "transitions": [{"label": "t", "set": {"b": {"incr": 1}}}],
+        "invariants": {"i": {"forbid": {"b": 9}}},
+    }
+    p = protocol_from_spec(spec)
+    assert p.transitions((True,)) == [("t", (True,))]  # no-op, exactly as before

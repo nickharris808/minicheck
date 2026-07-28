@@ -228,3 +228,90 @@ def test_liveness_is_checked_when_a_goal_is_present(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "liveness" in out
     assert "trap state" in out
+
+
+# ------------------------------------------------------------------------------- output formats
+def test_format_sarif_emits_valid_sarif(tmp_path, capsys):
+    import json as _json
+
+    assert main(["check", write(tmp_path, BROKEN), "--format", "sarif"]) == EXIT_REFUTED
+    d = _json.loads(capsys.readouterr().out)
+    assert d["version"] == "2.1.0"
+    assert d["runs"][0]["results"][0]["kind"] == "fail"
+
+
+def test_format_junit_emits_parseable_xml(tmp_path, capsys):
+    import xml.etree.ElementTree as ET
+
+    assert main(["check", write(tmp_path, BROKEN), "--format", "junit"]) == EXIT_REFUTED
+    root = ET.fromstring(capsys.readouterr().out)
+    assert root.get("failures") == "1"
+
+
+def test_format_junit_on_undetermined_is_an_error_not_skipped(tmp_path, capsys):
+    import xml.etree.ElementTree as ET
+
+    assert main(["check", write(tmp_path, UNBOUNDED), "--format", "junit"]) == EXIT_UNDETERMINED
+    root = ET.fromstring(capsys.readouterr().out)
+    assert root.get("errors") == "1" and root.get("skipped") == "0"
+
+
+def test_format_mermaid_numbers_the_counterexample_steps(tmp_path, capsys):
+    assert main(["check", write(tmp_path, BROKEN), "--format", "mermaid"]) == EXIT_REFUTED
+    out = capsys.readouterr().out
+    assert out.startswith("stateDiagram-v2")
+    assert "1. a_enter" in out and "2. b_enter" in out
+
+
+def test_format_dot_is_wellformed(tmp_path, capsys):
+    main(["check", write(tmp_path, BROKEN), "--format", "dot"])
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("digraph") and out.endswith("}")
+
+
+def test_format_svg_parses(tmp_path, capsys):
+    import xml.etree.ElementTree as ET
+
+    main(["check", write(tmp_path, BROKEN), "--format", "svg"])
+    ET.fromstring(capsys.readouterr().out)
+
+
+def test_format_svg_refuses_when_there_is_no_trace(tmp_path, capsys):
+    """A safe spec has no counterexample to draw; say so instead of emitting an empty picture."""
+    assert main(["check", write(tmp_path, SAFE), "--format", "svg"]) == EXIT_BAD_SPEC
+    assert "counterexample" in capsys.readouterr().err
+
+
+def test_every_format_keeps_the_same_exit_code(tmp_path):
+    """The rendering must never change the verdict the shell sees."""
+    path = write(tmp_path, BROKEN)
+    codes = {f: main(["check", path, "--format", f]) for f in ("text", "json", "sarif", "junit", "mermaid", "dot")}
+    assert set(codes.values()) == {EXIT_REFUTED}, codes
+
+
+def test_undetermined_exit_code_survives_every_format(tmp_path):
+    path = write(tmp_path, UNBOUNDED)
+    for f in ("text", "json", "sarif", "junit"):
+        assert main(["check", path, "--format", f]) == EXIT_UNDETERMINED, f
+
+
+def test_an_oversized_graph_is_refused_not_drawn(tmp_path, capsys):
+    spec = {
+        "fields": [f"f{i}" for i in range(8)],
+        "initial": {f"f{i}": 0 for i in range(8)},
+        "transitions": [{"label": f"s{i}", "when": {f"f{i}": 0}, "set": {f"f{i}": 1}} for i in range(8)],
+        "invariants": {"t": {"forbid": {"f0": 9}}},
+    }
+    assert main(["check", write(tmp_path, spec), "--format", "mermaid"]) == EXIT_BAD_SPEC
+    assert "legibly" in capsys.readouterr().err
+
+
+def test_max_nodes_can_be_raised(tmp_path, capsys):
+    spec = {
+        "fields": [f"f{i}" for i in range(8)],
+        "initial": {f"f{i}": 0 for i in range(8)},
+        "transitions": [{"label": f"s{i}", "when": {f"f{i}": 0}, "set": {f"f{i}": 1}} for i in range(8)],
+        "invariants": {"t": {"forbid": {"f0": 9}}},
+    }
+    main(["check", write(tmp_path, spec), "--format", "mermaid", "--max-nodes", "500"])
+    assert "stateDiagram-v2" in capsys.readouterr().out

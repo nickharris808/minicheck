@@ -2,12 +2,12 @@
 
 [![install](https://img.shields.io/badge/install-from%20GitHub-blue)](https://github.com/nickharris808/minicheck#install)
 [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-128%20passing-brightgreen)](tests/)
+[![tests](https://img.shields.io/badge/tests-195%20passing-brightgreen)](tests/)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![deps](https://img.shields.io/badge/required%20deps-none-brightgreen)
 
-**An explicit-state model checker in ~1619 lines. Shortest counterexamples. No required dependencies.**
+**An explicit-state model checker in ~2285 lines. Shortest counterexamples. No required dependencies.**
 
 ## Why this exists
 
@@ -94,6 +94,52 @@ $ echo $?
 0
 ```
 
+### Output formats
+
+`--format` puts the verdict where you already look.
+
+| Format | For |
+|---|---|
+| `text` *(default)* | reading in a terminal |
+| `json` | scripting; carries `exit_code`, `exhaustive`, `incomplete_reason` |
+| `sarif` | **GitHub code scanning** — a refuted invariant appears in the Security tab, trace and all |
+| `junit` | any CI test reporter |
+| `mermaid` | a state diagram that **renders natively in a GitHub PR or issue** |
+| `dot` | Graphviz, for papers and full layout control |
+| `svg` | self-contained image of the trace, no toolchain |
+
+```console
+$ minicheck check spec.json --format mermaid
+stateDiagram-v2
+    %% verdict: REFUTED
+    [*] --> S0
+    S0 : a=0, b=0, lock=0
+    S1 : a=1, b=0, lock=1
+    ...
+    S0 --> S1 : 1. a_enter
+    S1 --> S3 : 2. b_enter
+    classDef cex fill:#fdd,stroke:#c00,stroke-width:2px
+```
+
+Paste that into a PR comment and GitHub draws it. The counterexample path is highlighted and its
+steps are **numbered**, so the order is unambiguous rather than left to the reader.
+
+**How a three-valued verdict maps onto two-valued formats.** This is the part that is easy to get
+wrong, and it is resolved the same way everywhere: *UNDETERMINED is not a pass.*
+
+| Verdict | SARIF | JUnit |
+|---|---|---|
+| PROVED | `kind: pass` | passing test case |
+| REFUTED | `level: error, kind: fail` + `codeFlows` with the trace | `<failure>` |
+| **UNDETERMINED** | `kind: informational, level: warning` — never `pass` | **`<error>`** |
+
+JUnit's `<skipped>` would have been the tempting choice for UNDETERMINED. It is wrong: every CI
+dashboard renders a skipped test green, which would quietly restore the exact defect this package
+exists to prevent. It is reported as `<error>`, with `skipped="0"`.
+
+A graph above `--max-nodes` (default 60) is **refused rather than drawn**. A hairball is not a
+diagram, and the point of the picture is to understand one counterexample, not to survey a space.
+
 ### Exit codes
 
 Designed for CI, so the shell sees the verdict:
@@ -122,7 +168,9 @@ that flag widens only the undetermined case and never masks a real counterexampl
 | `minicheck check SPEC` | check invariants, and liveness if the spec has a `goal` |
 | `minicheck validate SPEC` | schema-check only. Does not run the search, so it terminates on any spec |
 | `minicheck example` | print a worked spec to stdout |
-| `--json` | machine-readable output, including `exit_code` and `incomplete_reason` |
+| `--format F` | `text`, `json`, `sarif`, `junit`, `mermaid`, `dot`, `svg` (see above) |
+| `--json` | shorthand for `--format json` |
+| `--max-nodes N` | refuse to draw a graph larger than this (default 60) |
 | `--int-bound N` | largest magnitude an integer field may take (default 64) |
 | `--max-states N` | stop after this many reachable states (default 200000) |
 | `--allow-undetermined` | exit 0 instead of 3 when the search does not finish |
@@ -381,8 +429,14 @@ breadth-first.
 - Nothing when an invariant is trivially satisfied. `spec_warnings` reports a condition that names a
   value the bounded space cannot represent; such a condition genuinely holds, but it verifies nothing.
 
-**Measured performance.** Roughly 1.4×10⁵ to 3.2×10⁵ states/second in CPython on an M-series laptop
-(65,536 states in 0.46 s). That is the honest ceiling: this is a readable reference implementation,
+**Measured performance.** Declarative specs (`protocol_from_spec`, the CLI, the MCP server) run at
+roughly **3.2×10⁵ to 1.0×10⁶ states/second** in CPython on an M-series laptop. The spec's guards and
+assignments are compiled to index tuples once at build time rather than re-interpreted on every
+visited state, which is a **measured 2.8× mean speedup** (2.06×–3.15×) over 0.2.0 across four
+workloads. Verified by a differential test that requires the compiled and interpreted paths to agree
+on every successor of every reachable state, so the optimisation cannot change a verdict.
+Models built from a Python `transitions` callable run at roughly 1.4×10⁵–3.2×10⁵ states/second — for
+those, profiling shows ~80% of the time is inside *your* callable, so the engine is not the limit. That is the honest ceiling: this is a readable reference implementation,
 not a competitor to SPIN, TLC or NuSMV on industrial models.
 
 **A soundness bug shipped in 0.1.0 and is fixed here.** `int_bound` was applied as a *clamp*, so a
@@ -434,7 +488,7 @@ probably permits a transition you did not intend.
 pip install -e ".[test,smt]" && pytest
 ```
 
-128 tests, including a check that the core module acquires no third-party import at module level, and
+195 tests, including a check that the core module acquires no third-party import at module level, and
 one test per documented function using the exact calling convention shown above.
 
 ## Where this came from, and what is not here
@@ -454,7 +508,7 @@ Five small, independently useful tools built around one idea: **a verdict you ca
 
 | | |
 |---|---|
-| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~1619 lines, with a CLI. Shortest counterexamples, no required dependencies. |
+| [`minicheck`](https://github.com/nickharris808/minicheck) ← *you are here* | An explicit-state model checker in ~2285 lines, with a CLI. Shortest counterexamples, no required dependencies. |
 | [`protocol-bench`](https://github.com/nickharris808/protocol-bench) | 15 published IEEE 802.11 / 3GPP procedures with ground truth. A claimed detection must **replay**. |
 | [`minicheck-mcp`](https://github.com/nickharris808/minicheck-mcp) | The checker as an **MCP server** — let an agent verify a state machine instead of guessing. |
 | [`polyfrac`](https://github.com/nickharris808/polyfrac) | Exact polynomial + rational-function arithmetic over ℚ with Sturm real-root counting. Zero deps. |

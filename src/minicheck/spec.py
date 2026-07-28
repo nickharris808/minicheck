@@ -236,6 +236,39 @@ def _pred(cond: dict):
     return lambda d: all(d.get(f) == v for f, v in body.items())
 
 
+def _compile_rules(rules: list, idx: dict, int_bound: int) -> list:
+    """Translate the spec's transitions into index-addressed tuples, once.
+
+    The interpreted version did this work on every visited state: rebuild ``dict(zip(fields, s))``,
+    look each guard field up by name, and re-run the `isinstance` bound check per assignment. None of
+    it depends on the state, so all of it belongs at build time.
+
+    Each compiled rule is ``(label, guards, literals, deltas)`` where
+
+        guards    tuple of (position, required_value)
+        literals  tuple of (position, value)          -- already bound-checked here
+        deltas    tuple of (position, field_name, delta) for incr/decr
+
+    Only ``deltas`` can leave the bound at runtime, because only they depend on the current value —
+    so that is the single check the hot loop still has to make.
+    """
+    compiled = []
+    for i, t in enumerate(rules):
+        label = t.get("label", f"t{i}")
+        guards = tuple((idx[f], v) for f, v in (t.get("when") or {}).items())
+        literals = []
+        deltas = []
+        for f, val in t["set"].items():
+            if isinstance(val, dict):
+                deltas.append((idx[f], f, val.get("incr", 0) - val.get("decr", 0)))
+            else:
+                # `validate_spec` already rejected out-of-bound literals, so this cannot raise here;
+                # it is compiled in so the runtime loop never re-checks a constant.
+                literals.append((idx[f], val))
+        compiled.append((label, guards, tuple(literals), tuple(deltas)))
+    return compiled
+
+
 def protocol_from_spec(spec: dict, int_bound: int = DEFAULT_INT_BOUND) -> Protocol:
     """Build a `Protocol` from a declarative spec. Raises `SpecError` if malformed.
 
@@ -249,35 +282,34 @@ def protocol_from_spec(spec: dict, int_bound: int = DEFAULT_INT_BOUND) -> Protoc
     initial = tuple(spec["initial"][f] for f in fields)
     rules = spec["transitions"]
 
-    def checked(v, field: str, label: str):
-        """Return `v`, or refuse if it left the bound. Never silently truncates."""
-        if isinstance(v, int) and not isinstance(v, bool) and not (-int_bound <= v <= int_bound):
-            raise IntBoundExceeded(
-                f"transition {label!r} drives field {field!r} to {v}, outside int_bound {int_bound}. "
-                f"The state space is not finite under this bound, so no exhaustive verdict is "
-                f"available. Re-run with int_bound >= {abs(v)}."
-            )
-        return v
+    compiled = _compile_rules(rules, idx, int_bound)
+    lo, hi = -int_bound, int_bound
 
     def transitions(s):
-        d = dict(zip(fields, s))
+        # Hot loop. Everything that could be hoisted has been; what remains is the bound check on
+        # incr/decr, which genuinely depends on the current value.
         out = []
-        for i, t in enumerate(rules):
-            label = t.get("label", f"t{i}")
-            when = t.get("when") or {}
-            if not all(d.get(f) == v for f, v in when.items()):
-                continue
-            nxt = list(s)
-            for f, val in t["set"].items():
-                if isinstance(val, dict):
-                    cur = d.get(f)
-                    if not isinstance(cur, int) or isinstance(cur, bool):
+        for label, guards, literals, deltas in compiled:
+            for pos, want in guards:
+                if s[pos] != want:
+                    break
+            else:
+                nxt = list(s)
+                for pos, val in literals:
+                    nxt[pos] = val
+                for pos, field, delta in deltas:
+                    cur = s[pos]
+                    if cur.__class__ is not int:
                         continue  # incr/decr on a non-integer is a no-op
-                    delta = val.get("incr", 0) - val.get("decr", 0)
-                    nxt[idx[f]] = checked(cur + delta, f, label)
-                else:
-                    nxt[idx[f]] = checked(val, f, label)
-            out.append((label, tuple(nxt)))  # self-loops are legal and kept
+                    v = cur + delta
+                    if not (lo <= v <= hi):
+                        raise IntBoundExceeded(
+                            f"transition {label!r} drives field {field!r} to {v}, outside int_bound "
+                            f"{int_bound}. The state space is not finite under this bound, so no "
+                            f"exhaustive verdict is available. Re-run with int_bound >= {abs(v)}."
+                        )
+                    nxt[pos] = v
+                out.append((label, tuple(nxt)))  # self-loops are legal and kept
         return out
 
     invariants = {name: _pred(cond) for name, cond in (spec.get("invariants") or {}).items()}

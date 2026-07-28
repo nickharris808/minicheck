@@ -29,12 +29,24 @@ import sys
 from typing import Any
 
 from ._core import check_liveness, check_safety
+from .render import RenderTooLarge, to_dot, to_mermaid, to_svg
+from .report import to_junit, to_sarif
 from .spec import DEFAULT_INT_BOUND, SpecError, protocol_from_spec, spec_warnings
+from .verdict import EXIT_ERROR as EXIT_BAD_SPEC
+from .verdict import EXIT_PROVED, EXIT_REFUTED, EXIT_UNDETERMINED, combine, exit_code, from_holds
 
-EXIT_PROVED = 0
-EXIT_REFUTED = 2
-EXIT_UNDETERMINED = 3
-EXIT_BAD_SPEC = 4
+# Re-exported: callers and tests import the exit codes from here as the CLI's public contract.
+__all__ = [
+    "main",
+    "build_parser",
+    "FORMATS",
+    "EXIT_PROVED",
+    "EXIT_REFUTED",
+    "EXIT_UNDETERMINED",
+    "EXIT_BAD_SPEC",
+]
+
+FORMATS = ("text", "json", "sarif", "junit", "mermaid", "dot", "svg")
 
 EXAMPLE_SPEC = {
     "name": "mutex",
@@ -117,15 +129,17 @@ def _render(res: dict, live: dict | None, warnings: list, verdict: str) -> str:
 
 
 def _verdict(res: dict, live: dict | None) -> tuple[str, int]:
-    """Aggregate to one verdict. Refuted dominates undetermined, which never becomes proved."""
-    verdicts = [p["holds"] for p in res["properties"].values()]
+    """Aggregate to one verdict, via the shared contract in `minicheck.verdict`.
+
+    The precedence rules live in one place so the CLI, the MCP server and every emitter cannot
+    drift apart on what "undetermined" means.
+    """
+    exh = res["exhaustive"]
+    parts = [from_holds(p["holds"], exhaustive=exh) for p in res["properties"].values()]
     if live is not None:
-        verdicts.append(live["holds"])
-    if any(v is False for v in verdicts):
-        return "REFUTED", EXIT_REFUTED
-    if any(v is None for v in verdicts) or not res["exhaustive"]:
-        return "UNDETERMINED", EXIT_UNDETERMINED
-    return "PROVED", EXIT_PROVED
+        parts.append(from_holds(live["holds"], exhaustive=exh))
+    v = combine(parts)
+    return v.value, exit_code(v)
 
 
 def cmd_check(args) -> int:
@@ -158,7 +172,39 @@ def cmd_check(args) -> int:
     if args.allow_undetermined and code == EXIT_UNDETERMINED:
         code = EXIT_PROVED
 
-    if args.json:
+    fmt = getattr(args, "format", None) or ("json" if args.json else "text")
+
+    if fmt in ("mermaid", "dot", "svg"):
+        # A diagram needs a specific counterexample; pick the first refuted invariant.
+        cex = next((p["counterexample"] for p in res["properties"].values() if p["holds"] is False), None)
+        try:
+            if fmt == "mermaid":
+                print(to_mermaid(model, cex, verdict=verdict, max_nodes=args.max_nodes))
+            elif fmt == "dot":
+                print(to_dot(model, cex, verdict=verdict, max_nodes=args.max_nodes))
+            else:
+                if cex is None:
+                    print(
+                        "BAD SPEC\n\n  --format svg draws a counterexample, and this spec has none "
+                        "(verdict " + verdict + "). Use --format mermaid or dot to draw the whole "
+                        "reachable graph instead.",
+                        file=sys.stderr,
+                    )
+                    return EXIT_BAD_SPEC
+                print(to_svg(model, cex, verdict=verdict, max_nodes=args.max_nodes))
+        except RenderTooLarge as e:
+            print(f"BAD SPEC\n\n  {e}", file=sys.stderr)
+            return EXIT_BAD_SPEC
+        return code
+
+    if fmt == "sarif":
+        print(to_sarif(res, spec_path=args.spec))
+        return code
+    if fmt == "junit":
+        print(to_junit(res, spec_path=args.spec))
+        return code
+
+    if fmt == "json":
         payload: dict[str, Any] = {
             "ok": True,
             "verdict": verdict,
@@ -240,6 +286,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=200000,
         metavar="N",
         help="stop after this many reachable states (default 200000)",
+    )
+    c.add_argument(
+        "--format",
+        choices=FORMATS,
+        default=None,
+        help="output format (default text). sarif -> GitHub code scanning; junit -> CI test "
+        "reports; mermaid/dot/svg -> a diagram of the counterexample.",
+    )
+    c.add_argument(
+        "--max-nodes",
+        type=int,
+        default=60,
+        metavar="N",
+        help="refuse to draw a graph larger than this (default 60). A diagram nobody can read is not a diagram.",
     )
     c.add_argument(
         "--allow-undetermined",
