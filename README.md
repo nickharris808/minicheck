@@ -1,7 +1,7 @@
 # minicheck
 
 [![install](https://img.shields.io/badge/install-from%20GitHub-blue)](https://github.com/nickharris808/minicheck#install)
-[![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml)
+[![CI](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml/badge.svg)](https://github.com/nickharris808/minicheck/actions/workflows/ci.yml)
 [![tests](https://img.shields.io/badge/tests-270%20passing-brightgreen)](tests/)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -29,14 +29,15 @@ induction is optional and lazily imported.
 ## Install
 
 ```
-# from GitHub (PyPI release pending)
+pip install minicheck
+pip install "minicheck[smt]"                     # + z3 k-induction
+
+# or from source, unreleased main:
 pip install "minicheck @ git+https://github.com/nickharris808/minicheck.git"
-pip install "minicheck[smt] @ git+https://github.com/nickharris808/minicheck.git"   # + z3 induction
 ```
 
-> `pip install minicheck` does not work yet — the package is not on PyPI. Install from GitHub as
-> shown above. The distribution builds and is `twine check`-clean, with no unpublished
-> dependencies, so it is ready to upload whenever that happens.
+> Published on PyPI as **`minicheck` 0.4.0** (2026-07-30). `pip install minicheck` works.
+> The `git+https` form above installs unreleased `main` instead.
 
 ## 30-second quickstart
 
@@ -120,6 +121,10 @@ stateDiagram-v2
     S1 --> S3 : 2. b_enter
     classDef cex fill:#fdd,stroke:#c00,stroke-width:2px
 ```
+
+*Abridged at the `...` — the real output also lists the states and edges **outside** the
+counterexample, plus a `class Sn cex` line per highlighted state, so you can see the paths not
+taken.*
 
 Paste that into a PR comment and GitHub draws it. The counterexample path is highlighted and its
 steps are **numbered**, so the order is unambiguous rather than left to the reader.
@@ -561,14 +566,74 @@ transition relation unsatisfiable. Return two disjoint copies.
 first violating state found is at minimum depth. If a shorter path exists in your head, the model
 probably permits a transition you did not intend.
 
+## FAQ
+
+**"Why would I use this instead of TLA+ or SPIN?"**
+For most serious work, you should not. They are better model checkers with more capability, more
+users, and decades of engineering behind them. Use `minicheck` for the invariant you would otherwise
+**not check at all** — because adopting TLC or SPIN means adopting a toolchain, and that friction is
+why the retry logic gets reasoned about in a code review instead. When a model outgrows this,
+`--format promela` and `--format tla` export to the real thing; a tool that strands you at its own
+ceiling is one to be wary of adopting in the first place.
+
+**"How do I know the checker itself is correct?"**
+You do not have to take it on faith, and there are three independent reasons not to. (1) A
+differential test against a deliberately naive reachability reimplementation sharing no code with the
+engine — 500 random protocols, verdicts *and* state counts must match exactly. (2) A differential
+test against **SPIN**: models are exported to Promela and checked by an entirely independent
+industrial model checker, whose verdict must agree. CI installs SPIN so this runs rather than skips.
+(3) Counterexamples are self-checking — you never have to trust a `REFUTED`, because the trace
+replays. For `PROVED` the trust question is real, which is why (1) and (2) exist and why the engine
+is kept small enough to audit.
+
+**"It found a bug that isn't real."**
+Then the model permits something the real system does not, and that is worth knowing, because it
+means your model and your system disagree. Replay the trace step by step; one of its transitions is
+one your system cannot take. Add the guard that makes that true in the model, and re-check.
+
+**"`UNDETERMINED` — is that a pass or a fail?"**
+Neither, and treating it as either loses information. It means the search did not cover the space, so
+nothing was established. Read `incomplete_reason`: usually a field growing without bound, or the
+`max_states` cap. Do not reach for `--allow-undetermined` to make it go away.
+
+**"`--allow-undetermined` means I can ignore the strictness, so what's the point?"**
+The point is that it is a decision you made, visible in your config, rather than a default that
+quietly decided for you. It also does less than you might assume: it widens only the undetermined
+case. A refutation still fails the build, and there is a test named for that.
+
+**"Isn't the three-valued verdict over-engineering?"**
+It came from a real defect, not from theory. Version 0.1.0 *clamped* integer fields at `int_bound`
+instead of raising, so a counter that genuinely reached 100 saturated at 64, the forbidden state was
+never generated, and `never reach 100` was reported as **holding**. Every individual piece behaved
+sensibly; the bug was structural, in that there was nowhere to put "I did not finish looking", so it
+became "nothing was found". The third value is that missing place. See
+[SECURITY-ADVISORY.md](SECURITY-ADVISORY.md).
+
+**"Is it production-ready?"**
+Yes, for models that fit its bounds — which it tells you about rather than guessing. It is not SPIN
+and does not claim to be. Read [Honest scope](#honest-scope) first; that is what it is for.
+
+**"Something here gave me a confident answer that was wrong."**
+That is the most serious class of bug in this portfolio, and it is worth an issue rather than a
+workaround. Please include the input. The response to this category is disclosure and a regression
+test, not a quiet patch — which is why there is a security advisory in this repository at all.
+
 ## Tests
 
 ```
 pip install -e ".[test,smt]" && pytest
 ```
 
+```console
+$ pytest -q
+........................................................................ [ 80%]
+......................................................                   [100%]
+270 passed in 16.81s
+```
+
 270 tests, including a check that the core module acquires no third-party import at module level, and
-one test per documented function using the exact calling convention shown above.
+one test per documented function using the exact calling convention shown above. One of them asserts
+this README's own test count against `pytest --collect-only`, so the badge cannot drift.
 
 ## Where this came from, and what is not here
 
